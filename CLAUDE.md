@@ -1,4 +1,4 @@
-# CLAUDE.md — Socratic Tutor App
+# Socratic Tutor App
 
 > **Core philosophy**: The AI never solves the problem for the student.
 > It guides them to solve it themselves by surfacing their own understanding,
@@ -21,7 +21,85 @@ A chat-first teaching assistant that:
 4. Offloads mechanical sub-tasks (algebra, graphing, code execution) to backend tools
 5. Tracks session-level metrics on the student's problem-solving process
 
-**Current scope (v1)**: Solving loop + session metrics. No login, no Firebase, no persistent user profiles.
+**Current scope (v1)**: Solving loop + session metrics. Simple username-based persona persistence. No Firebase, no auth tokens.
+
+---
+
+## Login & Persona Flow
+
+On first launch (or if no persona file exists for the user), the app runs a **one-time onboarding conversation** before routing to the main tutor. The persona is then saved to disk and reattached on every subsequent session — no re-asking.
+
+### Onboarding flow
+
+1. User enters a username (no password — this is identity, not auth).
+2. App checks `personas/{username}.json`. If it exists → skip to session.
+3. If not: start the **persona interview** — an LLM-driven conversational intake.
+4. After the interview, an LLM call synthesises responses into a structured persona file and saves it.
+5. Session begins with persona attached to the system prompt.
+
+### Persona interview (LLM-driven)
+
+The intake is a short conversation, not a form. The LLM asks 5–8 questions, one at a time:
+
+```
+System: You are conducting a brief background intake for an AI tutoring app.
+Ask the student 5–8 questions, one at a time, to understand:
+- Their current educational level (school year, university, self-taught, etc.)
+- Subjects they feel confident in
+- Subjects they find difficult
+- How they prefer to learn (examples first, theory first, trial-and-error, etc.)
+- Any specific goals for using this tutor
+Do NOT ask for personal details. Keep each question short and conversational.
+When done, output ONLY a JSON object (no preamble) with the schema below.
+```
+
+### Persona JSON schema (`personas/{username}.json`)
+
+```json
+{
+  "username": "alex",
+  "created_at": "2025-01-01T00:00:00Z",
+  "education_level": "undergraduate | high_school | self_taught | professional | other",
+  "education_detail": "2nd year computer science",
+  "confident_subjects": ["linear algebra", "Python"],
+  "difficult_subjects": ["probability", "recursion"],
+  "learning_style": "examples_first | theory_first | trial_and_error | mixed",
+  "goals": "Prepare for algorithms exam in 3 weeks",
+  "preferred_pace": "slow | medium | fast",
+  "raw_responses": [
+    { "question": "...", "answer": "..." }
+  ]
+}
+```
+
+`raw_responses` is kept for potential future reprocessing; only the structured fields are used in the system prompt.
+
+### Persona injection (per session)
+
+```python
+def build_prompt(session: Session, user_message: str) -> list[dict]:
+    persona_ctx = f"Student profile:\n{session.persona.to_context_str()}" if session.persona else ""
+    return [
+        {"role": "system", "content": SOCRATIC_BASE + DOMAIN_SYSTEM_PROMPTS[session.domain]},
+        {"role": "system", "content": persona_ctx},
+        {"role": "system", "content": f"Session state:\n{session.to_context_str()}"},
+        *session.message_history,
+        {"role": "user", "content": user_message}
+    ]
+```
+
+`persona.to_context_str()` returns a short natural-language summary:
+> *"The student is a 2nd-year CS undergraduate. Confident in linear algebra and Python. Finds probability and recursion difficult. Prefers examples before theory. Goal: prepare for algorithms exam."*
+
+### Persona update (optional, v1)
+
+A `/persona/reset` route clears the file and reruns onboarding. No in-session updates in v1.
+
+### Storage
+
+- Personas stored as JSON files in `personas/` directory (server-side).
+- No encryption in v1 — no sensitive data is collected.
+- Username is the only identifier; no passwords, no email.
 
 ---
 
@@ -31,10 +109,10 @@ A chat-first teaching assistant that:
 |---|---|
 | Frontend | React (Vite) + Tailwind |
 | Backend | Python + FastAPI |
-| LLM routing | OpenRouter (Claude Sonnet as primary) |
+| LLM routing | OpenRouter (model-agnostic; no model hardcoded — set via `LLM_MODEL` env var) |
 | Tool execution | FastAPI endpoints (algebra CAS, code runner, graphing) |
 | Session state | In-memory (server-side, keyed by session ID) |
-| Auth | None (v1) |
+| Auth | None (v1 — simple username entry for persona persistence) |
 
 ---
 
@@ -45,21 +123,27 @@ Browser (React)
   │
   ├── ChatPane            ← primary interaction surface
   ├── SubproblemPanel     ← decomposition tree, built collaboratively
-  ├── ToolPane            ← graphs / code output / algebra steps (contextual)
+  ├── ToolPane            ← renders tool output for whichever specialization is active
   └── MetricsDrawer       ← session summary (shown at end)
         │
         ▼
 FastAPI backend
   ├── POST /chat              ← main message relay, carries session state
   ├── POST /session/new       ← initialise session, detect domain
-  ├── POST /tools/graph       ← matplotlib / plotly render → base64
-  ├── POST /tools/algebra     ← sympy CAS
-  ├── POST /tools/run-code    ← sandboxed exec (Python / JS)
+  ├── POST /tools/{tool_name} ← generic tool dispatch (routes to registered plugins)
   └── GET  /session/metrics   ← return session summary object
         │
         ▼
-OpenRouter  →  Claude Sonnet (teaching persona)
-              (tool calls invoke FastAPI tool endpoints)
+Specialization Plugin Registry
+  ├── math/           ← registers: algebra (sympy), graph (matplotlib)
+  ├── programming/    ← registers: code_runner (sandboxed exec)
+  ├── essay/          ← registers: (no tools in v1; prompt-only)
+  ├── science/        ← registers: graph, data_table
+  └── [future]/       ← drop a new folder in, register tools + prompt, done
+        │
+        ▼
+OpenRouter  →  configured model via LLM_MODEL env var (teaching persona)
+              (tool calls invoke registered plugin endpoints)
 ```
 
 ---
@@ -220,11 +304,116 @@ After all subproblems are solved:
 
 ---
 
+## Specialization Plugin System
+
+Each domain (math, programming, essay, science, etc.) is a **self-contained plugin** — a folder that registers its own system prompt, tools, and UI components. The core app has zero knowledge of any specific domain. Adding a new specialization requires no changes to core code.
+
+### Plugin folder structure
+
+```
+specializations/
+  math/
+    __init__.py          ← registers the plugin
+    prompt.txt           ← domain system prompt (Socratic core auto-prepended)
+    tools/
+      algebra.py         ← sympy CAS tool
+      graph.py           ← matplotlib render tool
+    manifest.json        ← declares tool names, descriptions, UI hints
+  programming/
+    __init__.py
+    prompt.txt
+    tools/
+      code_runner.py
+    manifest.json
+  essay/
+    __init__.py
+    prompt.txt
+    manifest.json        ← no tools in v1
+  science/
+    __init__.py
+    prompt.txt
+    tools/
+      graph.py           ← shared impl (symlinked or copied from math/)
+      data_table.py
+    manifest.json
+```
+
+### manifest.json schema
+
+```json
+{
+  "domain": "math",
+  "display_name": "Mathematics",
+  "complexity_hints": ["single-step", "multi-step", "open-ended"],
+  "tools": [
+    {
+      "name": "algebra",
+      "description": "Symbolic algebra and calculus via sympy",
+      "endpoint": "/tools/algebra",
+      "ui_component": "AlgebraSteps",
+      "input_schema": {
+        "expression": "string",
+        "operation": "simplify | solve | diff | integrate"
+      }
+    },
+    {
+      "name": "graph",
+      "description": "Plot a mathematical expression",
+      "endpoint": "/tools/graph",
+      "ui_component": "GraphView",
+      "input_schema": {
+        "expression": "string",
+        "x_range": "[number, number]",
+        "variables": "object"
+      }
+    }
+  ]
+}
+```
+
+### Plugin registration (Python)
+
+```python
+# specializations/math/__init__.py
+from app.plugin_registry import register_specialization
+
+register_specialization(
+    domain="math",
+    prompt_file=__file__,           # resolved relative to this folder
+    tools=["algebra", "graph"],
+)
+```
+
+### Generic tool dispatch
+
+All tool calls go through a single endpoint. The registry resolves the handler:
+
+```
+POST /tools/{tool_name}
+  body: { session_id, ...tool-specific args }
+  returns: { result, ui_component, display_data }
+```
+
+The LLM never calls a hardcoded endpoint. It picks from the tool list injected into its system prompt by the active plugin.
+
+### Adding a new specialization (checklist)
+
+1. Create `specializations/{domain}/`
+2. Write `prompt.txt` (Socratic rules are auto-prepended)
+3. Implement any tools in `tools/` (or reuse existing ones via import)
+4. Write `manifest.json`
+5. Register in `__init__.py`
+6. Restart — the domain appears automatically in detection and routing
+
+No changes to `/chat`, `/session/new`, the frontend, or any other specialization.
+
+---
+
 ## Domain System Prompts
 
-Each domain gets a base system prompt that extends the Socratic core.
+Each specialization's `prompt.txt` extends the Socratic core (which is always prepended). The Socratic base enforces the universal rules (one question at a time, never enumerate subproblems, etc.).
 
-### Mathematics
+### Mathematics (`specializations/math/prompt.txt`)
 ```
 You are a maths tutor. When the student needs to see symbolic work, invoke the
 algebra tool — do not compute by hand in the chat. When a visual would help,
@@ -232,7 +421,7 @@ invoke the graph tool. Never simplify expressions for the student unless they
 have attempted it first. Ask "what rule applies here?" before any algebraic step.
 ```
 
-### Programming
+### Programming (`specializations/programming/prompt.txt`)
 ```
 You are a programming tutor. Do not write code for the student. Ask them to
 write pseudocode first. When they have working pseudocode, help them translate
@@ -241,19 +430,27 @@ the output. For bugs, ask "what do you expect this line to do?" before pointing
 at the error.
 ```
 
-### Essay / Writing
+### Essay / Writing (`specializations/essay/prompt.txt`)
 ```
 You are a writing coach. Do not draft any part of the essay for the student.
 Help them build an outline by asking about their argument and evidence.
 For each paragraph, ask "what is the one thing this paragraph must prove?"
 ```
 
-### Science
+### Science (`specializations/science/prompt.txt`)
 ```
 You are a science tutor. Ground every concept in an observable or experimental
 basis. Ask the student "how would you test this?" for any claim. Use the graph
 tool to plot data the student provides. Do not state laws or formulae — ask
 the student to recall or derive them.
+```
+
+### General (`specializations/general/prompt.txt`)
+```
+You are a Socratic tutor for general questions. Identify the core concept the
+student is trying to understand. Ask them what they already know before
+offering any framing. Use only questions and analogies — never definitions or
+explanations offered unprompted.
 ```
 
 ---
@@ -327,27 +524,33 @@ The understanding delta between `initial_understanding` and `final_understanding
 
 ```
 POST /session/new
-  body: { query: string }
+  body: { query: string, username?: string }
   returns: { session_id, domain, opening_message }
 
 POST /chat
   body: { session_id, message: string }
   returns: { reply, phase, subproblems, tool_calls: [] }
 
-POST /tools/algebra
-  body: { expression: string, operation: "simplify"|"solve"|"diff"|"integrate" }
-  returns: { steps: [], result: string }
-
-POST /tools/graph
-  body: { expression: string, x_range: [number, number], variables: {} }
-  returns: { image_base64: string }
-
-POST /tools/run-code
-  body: { code: string, language: "python"|"javascript" }
-  returns: { stdout: string, stderr: string, error: bool }
+POST /tools/{tool_name}
+  body: { session_id, ...tool-specific args }
+  returns: { result, ui_component, display_data }
+  note: tool_name must be registered in the active domain's manifest.json
 
 GET /session/{session_id}/thinking-trace
   returns: { ...thinking trace object }
+
+POST /persona/create
+  body: { username: string }
+  returns: { status: "exists" | "created", persona }
+  note: if persona doesn't exist, triggers LLM onboarding interview
+
+POST /persona/reset
+  body: { username: string }
+  returns: { status: "reset" }
+
+GET /specializations
+  returns: [ { domain, display_name, tools: [] } ]
+  note: auto-generated from plugin registry — useful for frontend and debugging
 ```
 
 ---
@@ -356,15 +559,22 @@ GET /session/{session_id}/thinking-trace
 
 ```python
 def build_prompt(session: Session, user_message: str) -> list[dict]:
+    domain_prompt = plugin_registry.get_prompt(session.domain)  # loads specialization/prompt.txt
+    persona_ctx = session.persona.to_context_str() if session.persona else ""
     return [
-        {"role": "system", "content": DOMAIN_SYSTEM_PROMPTS[session.domain] + SOCRATIC_BASE},
+        {"role": "system", "content": SOCRATIC_BASE + "\n\n" + domain_prompt},
+        {"role": "system", "content": f"Student profile:\n{persona_ctx}"},
         {"role": "system", "content": f"Session state:\n{session.to_context_str()}"},
         *session.message_history,
         {"role": "user", "content": user_message}
     ]
 ```
 
+`SOCRATIC_BASE` is a constant string (defined in `app/prompts/socratic_base.txt`) that enforces the universal rules: one question at a time, never enumerate subproblems, never give the full solution, tools produce data not answers, etc. It is always prepended before the domain prompt.
+
 `session.to_context_str()` returns a compact JSON of current phase, active subproblem, hint count, and student's stated initial understanding.
+
+The model to call is read from the `LLM_MODEL` environment variable and passed to OpenRouter. No model name is hardcoded anywhere in the application.
 
 ---
 
@@ -394,26 +604,30 @@ Phase transitions are detected by the LLM (via a structured output call) or trig
 
 ## What to Build First (Recommended Order)
 
-1. **Core chat loop** — FastAPI `/chat` + OpenRouter relay + session state in memory
-2. **Domain detection** — simple classification prompt, returns domain enum
-3. **Socratic system prompts** — one per domain, tested manually
-4. **Phase state machine** — clarification → decomposition → solving → wrap-up
-5. **SubproblemPanel UI** — renders decomposition tree, updates live
-6. **Hint ladder** — tracked in session state, escalates in system prompt context
-7. **Tool endpoints** — algebra (sympy), graph (matplotlib), code runner (subprocess/sandbox)
-8. **ToolPane UI** — slides in when tool result available
-9. **Confidence widget** — post-subproblem check-in
-10. **Thinking trace + ThinkingTraceDrawer** — session narrative at wrap-up, understanding delta as centrepiece
-11. **Escape hatch with reflection gate** — confirmed twice, reflection sentence required before answer is given
+1. **Plugin registry** — folder-scanning loader, manifest parser, tool dispatcher (`/tools/{tool_name}`)
+2. **Socratic base prompt** — `app/prompts/socratic_base.txt`, shared across all domains
+3. **Core chat loop** — FastAPI `/chat` + OpenRouter relay + session state in memory
+4. **Domain detection** — simple classification prompt, returns domain enum; validated against registered plugins
+5. **First specialization (math)** — algebra + graph tools, as a reference implementation for the plugin pattern
+6. **Remaining specializations** — programming, essay, science, general (each as a plugin)
+7. **Phase state machine** — clarification → decomposition → solving → wrap-up
+8. **Persona onboarding** — LLM-driven interview, `personas/{username}.json` persistence, `/persona/create` + `/persona/reset`
+9. **Persona injection** — attach to system prompt on session start
+10. **SubproblemPanel UI** — renders decomposition tree, updates live
+11. **Hint ladder** — tracked in session state, escalates in system prompt context
+12. **ToolPane UI** — slides in when tool result available; `ui_component` field in tool response drives which view renders
+13. **Confidence widget** — post-subproblem check-in
+14. **Thinking trace + ThinkingTraceDrawer** — session narrative at wrap-up, understanding delta as centrepiece
+15. **Escape hatch with reflection gate** — confirmed twice, reflection sentence required before answer is given
 
 ---
 
 ## Out of Scope (v1)
 
-- User login / accounts
-- Firebase / persistent storage
-- Cross-session memory / user personas
-- Age/experience adaptation
-- AI-generated persona JSON from background questions
+- User login with passwords / auth tokens
+- Firebase / cloud storage (personas are local JSON files)
+- Cross-session learning (persona is static once created; no session-to-session updates)
+- Age/experience adaptation beyond what the persona provides
+- Real-time persona updates mid-session
 
-These are documented for v2 but should not influence v1 architecture decisions. Keep session state in-memory and stateless across restarts.
+These are documented for v2 but should not influence v1 architecture decisions. Keep session state in-memory and stateless across restarts, except for persona files.
