@@ -13,7 +13,7 @@ How to actually implement the specific specializations themselves. For example, 
 When I was trying to properly structure my initial idea and build the flowchart. I asked the AI to critically analyze my proposed design for feasibility, assess how relevant it was to the actual problem statement, and suggest improvements. I even told it to completely discard the idea if it missed the mark. Getting that objective pushback and structural help allowed me to understand and refine my own concept much better before presenting it.
 
 **One moment where AI made me less careful was...**
-I can't really think of any such scenario as of now. I'll try to notice this in the future more carefully.
+Their are quite a lot of moments where I took the confident AI output for granted without reading it prooperly because skimming through it looked good and it all looked really structured which made me bypass my own critical evaluation. I can not really recall any such scenario as of now. I will notice more on this in the future.
 
 **One thing another teammate knew that I depended on was...**
 How to actually start building out one of those specific specializations. Watching them figure out the concrete details for a single use case gave me a much better understanding of the blueprint we need to use to approach building out any of the other specializations.
