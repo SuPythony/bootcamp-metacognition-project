@@ -1,7 +1,7 @@
 # Day 2 Reflection: Collaboration and AI Reliance
 
 **Today, I contributed most by...**
-Today I kickstarted the discussion by formally writing out and discussing my core idea, along with creating a detailed flowchart (which you can reference in [Image](image.png)). I discussed the problem and than the architecture of the tool I had thought of which was in continuation to the ideas we discussed yesterday and than we had further discussions on different parts of the project on how to build it further from that architecture. Presenting this all in detail really gave our team a clear, unified direction for the project.
+Today I kickstarted the discussion by formally writing out and discussing my core idea, along with creating a detailed flowchart (which you can refere in [Image](image.png)). I discussed the problem and than the architecture of the tool I had thought of which was in continuation to the ideas we discussed yesterday and than we had further discussions on different parts of the project on how to build it further from that architecture. Presenting this all in detail really gave our team a clear, unified direction for the project.
 
 **One thing I understood clearly was...**
 The overall architecture of the project. I have a solid grasp of how the entire system should flow conceptually from start to finish and how all the high-level pieces connect together to guide the user journey.
