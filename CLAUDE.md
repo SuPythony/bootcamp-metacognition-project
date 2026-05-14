@@ -130,10 +130,10 @@ bootcamp-metacognition-project/
 │   │   │   ├── types.ts        ← mirrors backend schemas (Session, Subproblem, ThinkingTrace, Persona)
 │   │   │   └── mock.ts         ← in-browser mock that satisfies the contract; toggle via VITE_USE_MOCK
 │   │   ├── components/         ← domain-agnostic: ChatPane, SubproblemPanel, ToolPane, HintBadge, ConfidenceWidget, ThinkingTraceDrawer
-│   │   ├── specializations/    ← domain-specific UI components, mirrored 1:1 with backend/specializations/
-│   │   │   ├── registry.ts     ← maps "<domain>.<component>" → React component (single source for lookup)
+│   │   ├── specializations/    ← domain-specific UI components + frontend tool handlers, mirrored 1:1 with backend/specializations/
+│   │   │   ├── registry.ts     ← maps "<domain>.<component>" → React component, and "<domain>.<handler>" → frontend tool handler
 │   │   │   ├── math/           ← AlgebraSteps.tsx, GraphView.tsx
-│   │   │   ├── programming/    ← CodeOutput.tsx, PseudocodePad.tsx
+│   │   │   ├── programming/    ← CodeOutput.tsx, PseudocodePad.tsx, handlers/PyodideRunner.ts
 │   │   │   ├── essay/          ← OutlineTree.tsx
 │   │   │   └── science/        ← GraphView.tsx, DataTable.tsx
 │   │   ├── views/              ← OnboardingView, SessionView, WrapUpView
@@ -192,7 +192,7 @@ Both modes share the same plumbing — same `/chat` endpoint, same plugin system
 
 **Current scope (v1)**:
 - Solving Mode + Critique Mode
-- Two specializations as MVP: `math` (school-level algebra and arithmetic) and `programming` (intro Python / pseudocode). `essay`, `science`, and `general` are scaffolded but not MVP — ship them only after MVP holds together.
+- Three specializations as MVP: `math` (school-level algebra, arithmetic, basic geometry), `programming` (intro Python with Pyodide-based browser runner), `essay` (paragraph-level argumentation, no tools). `science` and `general` remain scaffolded but not MVP — ship them only after the three core domains hold together.
 - Periodic reflection prompts + end-of-session thinking trace
 - Calibration tracking (predict-then-check)
 - Persona persistence per username, JSON files on disk
@@ -616,7 +616,8 @@ backend/specializations/
   "tools": [
     {
       "name": "algebra",
-      "description": "Symbolic algebra and calculus via sympy",
+      "description": "Symbolic algebra via sympy",
+      "execution": "backend",
       "endpoint": "/tools/algebra",
       "ui_component": "AlgebraSteps",
       "input_schema": {
@@ -627,12 +628,24 @@ backend/specializations/
     {
       "name": "graph",
       "description": "Plot a mathematical expression",
+      "execution": "backend",
       "endpoint": "/tools/graph",
       "ui_component": "GraphView",
       "input_schema": {
         "expression": "string",
         "x_range": "[number, number]",
         "variables": "object"
+      }
+    },
+    {
+      "name": "code_runner",
+      "description": "Run a Python snippet in the browser via Pyodide and return stdout/stderr/value",
+      "execution": "frontend",
+      "frontend_handler": "PyodideRunner",
+      "ui_component": "CodeOutput",
+      "input_schema": {
+        "code": "string",
+        "stdin": "string?"
       }
     }
   ],
@@ -689,13 +702,27 @@ register_specialization(
 
 ### Generic tool dispatch
 
-All tool calls go through a single endpoint. The registry resolves the handler:
+Tools declare an `execution` field in their manifest. Two paths:
+
+**Backend tools** (`execution: "backend"`) — server-side. The backend invokes the tool when the agent emits `control.tool_call`, and replays the result into the next turn's context. Direct invocation from the frontend goes through:
 
 ```
 POST /tools/{tool_name}
   body: { session_id, ...tool-specific args }
   returns: { result, ui_component, display_data }
 ```
+
+**Frontend tools** (`execution: "frontend"`) — browser-side. Used for sandboxed code execution (Pyodide) and anything else better kept off the server. Flow:
+
+1. Agent emits `control.tool_call = { name: "code_runner", args: { ... } }` as usual.
+2. Backend recognises `execution: "frontend"` and forwards the call to the client by including it in the SSE `state` event under `control.frontend_tool_call`.
+3. Frontend dispatches to the `frontend_handler` named in the manifest (e.g. `PyodideRunner`), captured in `frontend/src/specializations/<domain>/handlers/`.
+4. Result is sent back to the backend via `POST /chat` with a new body field: `tool_result: { name, result, display_data }`. The backend stores this in the session and replays it to the agent on the next LLM call.
+5. The matching `ui_component` (e.g. `CodeOutput`) renders the result in the `ToolPane`.
+
+This keeps the agent's protocol uniform (it always emits `tool_call`) while letting execution happen wherever it's safest. The student never sees the difference.
+
+For the Python code runner specifically: Pyodide loads lazily on first use, runs each snippet in a fresh execution context, and times out after 5 seconds. Available standard library is whatever Pyodide ships (sufficient for school-level intro Python).
 
 The LLM never calls a hardcoded endpoint. It picks from the tool list injected into its system prompt by the active plugin.
 
@@ -948,14 +975,19 @@ POST /session/new
         the critic-coach opens the session. Anonymous sessions are not supported.
 
 POST /chat                                      [SSE]
-  body: { session_id, message?: string, directive_response?: { component, value } }
+  body: { session_id,
+          message?: string,
+          directive_response?: { component, value },
+          tool_result?: { name, result, display_data, error? } }
   events:
-    event: token   data: { delta: "..." }       // streamed chunks of reply
-    event: state   data: { control: { ... } }   // emitted once at end; validated control object
-    event: error   data: { code, message }      // if the agent's output failed validation; client retries
-  note: either message or directive_response must be present. See "Specialization UI Contract"
-        and the structured-output schemas in socratic_base.txt / critic_base.txt for the
-        control shape (it differs by mode).
+    event: token             data: { delta: "..." }     // streamed chunks of reply
+    event: state             data: { control: { ... } } // emitted once at end; validated control object
+    event: frontend_tool     data: { name, args }       // present when control.tool_call resolves to a frontend tool
+    event: error             data: { code, message }    // if the agent's output failed validation; client retries
+  note: exactly one of message / directive_response / tool_result must be present.
+        tool_result is sent when the frontend has executed a tool (execution: "frontend")
+        and is feeding the result back. See "Generic tool dispatch" for the flow.
+        See structured-output schemas in socratic_base.txt / critic_base.txt for control shape.
 
 POST /tools/{tool_name}
   body: { session_id, ...tool-specific args }
@@ -1078,39 +1110,57 @@ A bash script under `deploy/deploy.sh` will wrap these once the first deploy lan
 
 ## What to Build First (MVP cut + stretch)
 
-The MVP slice is the minimum that lets us demo the brief's "show and do, don't tell" + "judge AI outputs" thesis with one domain end-to-end. Ship MVP first; stretch items only after MVP is stable and deployed.
+The MVP slice is the minimum that lets us demo the brief's "show and do, don't tell" + "judge AI outputs" thesis across all three core domains. Ship MVP first; stretch items only after MVP is stable and deployed.
 
 ### MVP (must ship before demo)
 
-1. **Plugin registry** — folder-scanning loader, manifest parser, tool dispatcher (`/tools/{tool_name}`)
-2. **Socratic base prompt** — `backend/app/prompts/socratic_base.txt`, shared across all domains and modes
-3. **Critic base prompt** — `backend/app/prompts/critic_base.txt`, used in critique mode
+**Infrastructure**
+
+1. **Plugin registry** — folder-scanning loader, manifest parser, tool dispatcher routing to backend tools or to the frontend bridge based on `execution`
+2. **Socratic base prompt** — `backend/app/prompts/socratic_base.txt`, shared across all domains for solving mode
+3. **Critic base prompt** — `backend/app/prompts/critic_base.txt`, used for critique mode
 4. **Core chat loop** — FastAPI `/chat` (SSE) + OpenRouter relay + session state in memory + JSON schema validation of agent output
 5. **Domain detection** — classifier call in `/session/new` via `LLM_MODEL_CLASSIFIER`
-6. **First domain: math (school-level)** — algebra tool, plot tool, calibrated for ages 13–18 (linear equations, basic geometry, intro probability, NOT undergraduate)
+6. **Frontend tool bridge** — SSE `frontend_tool` event, `tool_result` POST body, handler registry at `frontend/src/specializations/<domain>/handlers/`
+
+**Modes**
+
 7. **Solving phase state machine** — clarification → decomposition → solving → wrap-up; agent emits transitions, backend validates
-8. **Critique mode** — artifact import + generated artifact path, phase machine (clarification → critique → synthesis → wrap-up), CritiqueArtifactPanel, CritiqueFindingsList
-9. **Persona onboarding (short)** — 2-question intake via `"persona"` specialization, stub persona file, inline `persona_updates` capture during sessions
-10. **SubproblemPanel + CritiqueArtifactPanel UI**
-11. **Hint ladder + escape hatch with reflection gate** — tracked in session state, escalates in agent's system prompt context
-12. **Reflection prompts** — periodic, self-correction follow-up, escape-hatch, wrap-up; with quality evaluation
-13. **Calibration (predict-then-check)** — CalibrationCheck directive, calibration_points in session state, summary in thinking trace
-14. **Specialization UI registry + ToolPane** — for tool_result and agent_directive component rendering
-15. **Thinking trace + ThinkingTraceDrawer** — narrative with understanding delta (solving) or critique delta (critique) as centrepiece
-16. **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script
+8. **Critique mode** — artifact import + generated artifact path (via `LLM_MODEL_ARTIFACT`), phase machine (clarification → critique → synthesis → wrap-up), CritiqueArtifactPanel, CritiqueFindingsList
+
+**Domains** (all three required for v1)
+
+9. **Math (school-level)** — algebra tool (backend, sympy), graph tool (backend, matplotlib), calibrated for linear equations, basic geometry, intro probability. NOT undergraduate.
+10. **Programming (intro Python)** — code_runner tool (frontend, Pyodide), PseudocodePad component for pre-code planning. Calibrated for first-time programmers: variables, loops, conditionals, simple functions.
+11. **Essay (paragraph-level)** — no tools; OutlineTree component for claim/evidence/warrant decomposition. Calibrated for school essays (one claim per paragraph, name your evidence, etc.).
+
+**Cross-cutting product surface**
+
+12. **Persona onboarding (short)** — 2-question intake via `"persona"` specialization, stub persona file, inline `persona_updates` capture during sessions
+13. **SubproblemPanel + CritiqueArtifactPanel UI**
+14. **Hint ladder + escape hatch with reflection gate** — tracked in session state, escalates in agent's system prompt context
+15. **Reflection prompts** — periodic, self-correction follow-up, escape-hatch, wrap-up; with quality evaluation
+16. **Calibration (predict-then-check)** — CalibrationCheck directive, calibration_points in session state, summary in thinking trace
+17. **Specialization UI registry + ToolPane** — for `tool_result` and `agent_directive` component rendering; supports both backend and frontend tools
+18. **Thinking trace + ThinkingTraceDrawer** — narrative with understanding delta (solving) or critique delta (critique) as centrepiece
+
+**Ship**
+
+19. **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script
 
 ### Stretch (after MVP holds together)
 
-17. **Second domain: programming (intro)** — Pseudocode pad, code runner (sandboxed), calibrated for first-time programmers
-18. **Seeded-flaw artifacts** — Critique mode's generated artifacts get a secondary editing pass that inserts a subtle error, raising critique difficulty
-19. **Essay, science, general specializations** — already scaffolded; flesh out prompts and any required tools
+20. **Seeded-flaw artifacts** — Critique mode's generated artifacts get a secondary editing pass that inserts a subtle error, raising critique difficulty
+21. **Science specialization** — graph + data table tools, calibrated for school physics/biology
+22. **General specialization** — fallback for queries that don't classify into math/programming/essay/science
 
 ### Stop-the-line items
 
 The following are blockers that must hold throughout MVP development, not features to add:
 
-- **Agent Socratic discipline.** Every model output must be validated against the rules (never give the answer, one question at a time, etc.). Build a regression harness for this in `backend/tests/test_socratic_constraints.py` early — seeded dialogues + assertions on forbidden patterns. If the model drifts on a swap, this catches it.
-- **Code runner sandbox.** Stretch item 17 ships only after sandboxing is real (subprocess + resource limits + read-only FS at minimum). No "TODO sandbox" in production code.
+- **Agent Socratic discipline.** Every model output must be validated against the rules (never give the answer, one question at a time, etc.). Build a regression harness for this in `backend/tests/test_socratic_constraints.py` early — seeded dialogues + assertions on forbidden patterns. If the model drifts on a swap, this catches it. The harness covers BOTH base prompts (Socratic + Critic).
+- **Pyodide load weight.** First load is ~10 MB. Lazy-load only when the programming domain is active; show a one-time "loading Python..." indicator. If load fails, the code_runner gracefully degrades — the agent falls back to "let's trace through this by hand" mode (no tool call). Never block the chat on Pyodide.
+- **Three-domain prompt drift.** Each domain prompt must pass the Socratic regression harness independently, AND in critique mode. Plan one full review pass per domain prompt before deploy.
 
 ---
 
