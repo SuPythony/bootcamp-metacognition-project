@@ -1,0 +1,138 @@
+"""Socratic-discipline regression harness — framework only.
+
+This file is the stop-the-line scaffolding. Specialization PRs will add
+seeded dialogues per domain that exercise these assertion helpers against
+real LLM output (or against canned responses for unit-style fast checks).
+
+Anti-patterns the harness watches for:
+  - Two questions in one assistant reply.
+  - The reply containing the full solution / answer.
+  - The reply listing or enumerating subproblems instead of asking.
+"""
+
+from __future__ import annotations
+
+import re
+
+import pytest
+
+
+# Question mark count, ignoring quoted blocks (so "What's X?" inside a
+# Socratic exemplar in a hint doesn't trip the check). Approximation only —
+# the real check is "is this asking the student more than one thing".
+def assert_one_question_per_turn(reply: str) -> None:
+    # Strip backtick-fenced code/quote blocks so embedded ?'s in examples
+    # don't count.
+    stripped = re.sub(r"`[^`]*`", "", reply)
+    count = stripped.count("?")
+    if count > 1:
+        raise AssertionError(
+            f"Reply contains {count} question marks (expected ≤ 1):\n{reply!r}"
+        )
+
+
+# Solution-leak patterns. The agent should never present an answer as a
+# direct statement. These regexes are conservative — they catch obvious
+# leaks ("the answer is", "x = ...") but won't catch every disguised one;
+# domain-specific dialogues will tighten this per subject.
+_SOLUTION_LEAK_PATTERNS = [
+    re.compile(r"\bthe answer is\b", re.IGNORECASE),
+    re.compile(r"\bthe solution is\b", re.IGNORECASE),
+    re.compile(r"\bsimply\b.+\bequals\b", re.IGNORECASE),
+    re.compile(r"\bso\b.+x\s*=\s*-?\d+", re.IGNORECASE),
+]
+
+
+def assert_no_solution_leak(reply: str) -> None:
+    for pat in _SOLUTION_LEAK_PATTERNS:
+        m = pat.search(reply)
+        if m:
+            raise AssertionError(
+                f"Reply contains a likely solution leak ({pat.pattern!r}):\n{reply!r}"
+            )
+
+
+# Enumeration check. The agent must not list out the subproblems for the
+# student. Numbered or bulleted lists of steps in chat are the giveaway.
+def assert_no_subproblem_enumeration(reply: str) -> None:
+    # Three or more numbered bullets, or three or more dash-prefixed lines
+    # at the line start, is suspicious.
+    numbered = len(re.findall(r"(?m)^\s*\d+[.\)]\s", reply))
+    bulleted = len(re.findall(r"(?m)^\s*[-*]\s", reply))
+    if numbered >= 3 or bulleted >= 3:
+        raise AssertionError(
+            f"Reply appears to enumerate ≥3 steps (numbered={numbered}, "
+            f"bulleted={bulleted}):\n{reply!r}"
+        )
+
+
+# ---- Self-tests for the assertion helpers -----------------------------------
+#
+# Specialization-specific dialogues land in this file (or sibling files)
+# alongside their PRs. Until then, the helpers are tested against
+# manufactured strings so we know the matchers do what they claim.
+
+
+def test_one_question_passes_on_single_question():
+    assert_one_question_per_turn("What's your initial thinking on this?")
+
+
+def test_one_question_fails_on_two_questions():
+    with pytest.raises(AssertionError):
+        assert_one_question_per_turn(
+            "What's your read? And how confident are you?"
+        )
+
+
+def test_one_question_ignores_questions_inside_code_fences():
+    """Embedded examples in fenced spans shouldn't trip the count."""
+    reply = "What rule applies here? `like x+1=2 — does the inverse hint match?`"
+    assert_one_question_per_turn(reply)
+
+
+def test_no_solution_leak_passes_on_socratic_reply():
+    assert_no_solution_leak("What would you try first?")
+
+
+def test_no_solution_leak_catches_obvious_answer_statement():
+    with pytest.raises(AssertionError):
+        assert_no_solution_leak("So the answer is 3.")
+
+
+def test_no_solution_leak_catches_x_equals():
+    with pytest.raises(AssertionError):
+        assert_no_solution_leak("So x = -2 is the value.")
+
+
+def test_no_enumeration_passes_on_short_list():
+    """A reply with one or two bullets is fine — it might be calling out
+    a previously-stated structure, not enumerating the work."""
+    assert_no_subproblem_enumeration("Try this:\n- one approach\n- another")
+
+
+def test_no_enumeration_catches_three_step_recipe():
+    with pytest.raises(AssertionError):
+        assert_no_subproblem_enumeration(
+            "Here's how to do it:\n1. isolate x\n2. divide\n3. check"
+        )
+
+
+# ---- Per-domain fixture hook ------------------------------------------------
+#
+# Specialization PRs will parametrize this hook with their own seeded
+# dialogues. The skeleton below shows the intended shape.
+
+
+@pytest.mark.parametrize(
+    "reply,checks",
+    [
+        # Each tuple: (reply_string, list_of_assertion_helpers_to_run).
+        # No real dialogues yet — these come with the math/programming/essay
+        # specialization PRs. The empty parametrization keeps the test
+        # collected (and visible in `pytest --collect-only`) without
+        # generating any failing cases.
+    ],
+)
+def test_seeded_dialogue_passes_constraints(reply, checks):
+    for check in checks:
+        check(reply)
