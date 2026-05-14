@@ -6,18 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-**Scaffolded; design expanded; no domain logic yet.** The repository now contains the full directory structure described in "Repository Layout" below, with stub files in place. The six locked-in decisions and the new v1 design additions (Critique Mode, Reflection & Calibration subsystem, short onboarding with passive persona capture, AWS EC2 deployment) shape what gets built next.
+**Scaffolded; design expanded; no domain logic yet.** The repository now contains the full directory structure described in "Repository Layout" below, with stub files in place. The six locked-in decisions, Solving Mode, the Reflection & Calibration subsystem, short onboarding with passive persona capture, and AWS EC2 deployment shape v1. Critique Mode is designed and prompt-drafted (`critic_base.txt`) but deferred to v1.1.
 
-- `backend/` — FastAPI app shell, the Socratic base prompt at `backend/app/prompts/socratic_base.txt`, the Critic-Coach base prompt at `backend/app/prompts/critic_base.txt`, and all six specializations each with `__init__.py`, `prompt.txt`, and `manifest.json`. Math and programming carry tool stubs.
+- `backend/` — FastAPI app shell, the Socratic base prompt at `backend/app/prompts/socratic_base.txt`, the Critic-Coach base prompt at `backend/app/prompts/critic_base.txt` (kept on disk for v1.1; not loaded in v1), and all six specializations each with `__init__.py`, `prompt.txt`, and `manifest.json`. Math and programming carry tool stubs.
 - `frontend/` — Vite + React + Tailwind + TypeScript shell, typed API client (`client.ts`, `types.ts`, `mock.ts`), domain-agnostic component shells, specialization registry, per-domain `.tsx` component shells matching each `manifest.json`'s `ui_components` catalog.
 - `reflections/` — team journals, ignore for engineering work.
 
 What's a stub vs. what's real:
 
-- **Real and frozen**: directory layout, manifest schemas, `api/types.ts` shape (needs an update pass for mode/artifact/critique fields), dependency manifests, the two base prompts (socratic_base.txt and critic_base.txt).
-- **Stubs**: FastAPI routes return placeholders; React components render placeholders; tool modules raise `NotImplementedError`; plugin registry loader is not wired; mock.ts only covers the happy path of one endpoint; no critique-mode UI components exist yet.
+- **Real and frozen**: directory layout, manifest schemas, `api/types.ts` shape (needs an update pass for `mode` and the structured-output fields), dependency manifests, both base prompts (`socratic_base.txt` is v1; `critic_base.txt` is v1.1).
+- **Stubs**: FastAPI routes return placeholders; React components render placeholders; tool modules raise `NotImplementedError`; plugin registry loader is not wired; mock.ts only covers the happy path of one endpoint; critique-mode UI components are deferred to v1.1.
 
-Next milestones, in order: plugin registry loader → `/chat` SSE relay with JSON-schema validation → math specialization (school-level) end-to-end in solving mode → critique mode → deploy. See "What to Build First (MVP cut + stretch)" for the full sequence.
+Next milestones, in order: plugin registry loader → `/chat` SSE relay with JSON-schema validation → math specialization (school-level) end-to-end in Solving Mode → prompt regression harness → programming (Pyodide) and essay domains → reflection & calibration subsystems → persona onboarding → deploy. See "What to Build First" for the full sequence.
 
 ---
 
@@ -178,12 +178,12 @@ bootcamp-metacognition-project/
 
 A web-based learning tool for **teenagers (roughly 13–18)** that strengthens thinking skills which stay valuable in an AI-rich world: framing problems, checking understanding, calibrating confidence, reflecting on mistakes, and **judging AI outputs**. Built for the [Metacognition Vibe Coding Task](https://docs.tk.sg/Metacognition-Vibe-Coding-Task-551dd9d8b64483d7942101e280188fdb).
 
-The product is two cooperating loops served from one chat interface:
+The product is one loop in v1, with a second loop designed and deferred:
 
-1. **Solving Mode** — student brings a school-level problem (algebra, intro programming, essay outline, science question). A Socratic tutor agent guides them to construct the solution themselves, never giving the answer. The "show and do, don't tell" mandate from the brief lives here.
-2. **Critique Mode** — student brings an AI-generated artifact (a ChatGPT solution, a code snippet, an essay draft) or asks for one to be generated. A Critic-Coach agent guides them to evaluate it: spot errors, surface what's missing, distinguish confident-sounding from correct. This is the "judging AI outputs" axis the brief specifically asks for.
+1. **Solving Mode (v1)** — student brings a school-level problem (algebra, intro programming, essay outline). A Socratic tutor agent guides them to construct the solution themselves, never giving the answer. The "show and do, don't tell" mandate from the brief lives here.
+2. **Critique Mode (post-v1, designed but not built)** — student brings an AI-generated artifact and a Critic-Coach agent guides them to evaluate it. This is the "judging AI outputs" axis the brief asks for. Full design lives in "The Critique Loop" below and in `backend/app/prompts/critic_base.txt`; we ship Solving Mode first and add Critique Mode in a follow-up release.
 
-Both modes share the same plumbing — same `/chat` endpoint, same plugin system, same thinking-trace surface. They differ in agent prompt and the phase sequence they walk through.
+The session schema, plugin system, and thinking-trace surface are designed to accommodate both modes from day one — `mode` is on the session, the SSE protocol carries both base prompts' control shapes, and `critic_base.txt` is already drafted. The deferral is execution, not architecture. Once Solving Mode is stable in production, adding Critique Mode should be additive rather than disruptive.
 
 **Target audience constraints**:
 - Examples and tone calibrated for teens (school subjects, not undergraduate).
@@ -191,8 +191,8 @@ Both modes share the same plumbing — same `/chat` endpoint, same plugin system
 - Engagement loop matters: visible progress, agency in mode/domain choice, a thinking trace at the end that feels like a reward not a report card.
 
 **Current scope (v1)**:
-- Solving Mode + Critique Mode
-- Three specializations as MVP: `math` (school-level algebra, arithmetic, basic geometry), `programming` (intro Python with Pyodide-based browser runner), `essay` (paragraph-level argumentation, no tools). `science` and `general` remain scaffolded but not MVP — ship them only after the three core domains hold together.
+- Solving Mode only. Critique Mode is designed and prompt-drafted (`critic_base.txt`) but deferred to v1.1.
+- Three specializations as MVP: `math` (school-level algebra, arithmetic, basic geometry), `programming` (intro Python with Pyodide-based browser runner), `essay` (paragraph-level argumentation, no tools). `science` and `general` remain scaffolded but not MVP.
 - Periodic reflection prompts + end-of-session thinking trace
 - Calibration tracking (predict-then-check)
 - Persona persistence per username, JSON files on disk
@@ -379,15 +379,15 @@ Kept server-side, passed back to LLM as context on each turn.
 
 ## Modes
 
-A session is in one of two modes, fixed at creation time. Both share the same `/chat` plumbing, plugin system, and thinking-trace surface; the agent's system prompt and phase sequence change.
+A session is in one of two modes, fixed at creation time. Both share the same `/chat` plumbing, plugin system, and thinking-trace surface; the agent's system prompt and phase sequence change. **In v1 only Solving Mode is shipped**; Critique Mode is fully specified below and prompt-drafted, scheduled for v1.1.
 
-### Solving Mode (default)
-The student brings a problem; the agent guides them to construct the solution. Phase sequence: `clarification → decomposition → solving → wrap_up`. The classic Socratic loop documented below.
+### Solving Mode (v1)
+The student brings a problem; the agent guides them to construct the solution. Phase sequence: `clarification → decomposition → solving → wrap_up`. The Socratic loop documented below.
 
-### Critique Mode
-The student brings (or asks the system to generate) an AI artifact — a worked solution, an essay paragraph, a code snippet — and the agent guides them to evaluate it. Phase sequence: `clarification → critique → synthesis → wrap_up`. This is the "judge AI outputs" axis the brief calls for. Full description in "The Critique Loop" below.
+### Critique Mode (deferred to v1.1)
+The student brings (or asks the system to generate) an AI artifact — a worked solution, an essay paragraph, a code snippet — and the agent guides them to evaluate it. Phase sequence: `clarification → critique → synthesis → wrap_up`. This is the "judge AI outputs" axis the brief calls for. Full description in "The Critique Loop" section. Implemented when v1 is stable in production.
 
-The frontend exposes mode at session creation as a two-button choice on the landing screen: *"Bring a problem"* (solving) or *"Bring something an AI wrote"* (critique). A third path — *"Let the AI try first, then I'll critique it"* — creates a critique session whose `artifact` is generated by a separate non-Socratic LLM call seeded with the student's prompt.
+In v1 the frontend shows only the "Bring a problem" entry path. The `mode` field on sessions defaults to `"solving"` and is the only valid value the v1 API accepts. The "Bring something an AI wrote" + "Let the AI try first" entries land with critique.
 
 ---
 
@@ -511,9 +511,11 @@ After all subproblems are solved:
 
 ---
 
-## The Critique Loop (CRITICAL — second core flow)
+## The Critique Loop (deferred to v1.1 — design retained)
 
-This is the second teaching loop and the product's strongest answer to the brief's "judge AI outputs" directive. Same Socratic discipline as Solving, inverted: the AI produces or imports the content; the student evaluates it.
+This is the second teaching loop and the product's strongest answer to the brief's "judge AI outputs" directive. **Not in v1; scheduled for v1.1.** The design and prompt (`critic_base.txt`) are retained because the architecture below (session `mode`, artifact field, critique-specific control schema, frontend panels) was built into v1 to make this an additive rather than disruptive addition later.
+
+Same Socratic discipline as Solving, inverted: the AI produces or imports the content; the student evaluates it.
 
 ### Setup
 
@@ -964,15 +966,12 @@ The understanding delta (solving) or critique delta (critique) is the most impor
 POST /session/new
   body: {
     username: string,                          // required
-    mode: "solving" | "critique",              // required
-    query?: string,                            // required for solving and for "generate" critique
-    artifact?: { source: "imported", content: string }
-             | { source: "generate", prompt: string },  // required for critique mode
+    mode: "solving",                           // v1 only accepts "solving"; "critique" lands in v1.1
+    query: string,                             // required: the student's problem
   }
-  returns: { session_id, mode, domain, artifact?, opening_message }
-  note: classifier runs internally. For critique mode with source="generate",
-        a separate LLM call (LLM_MODEL_ARTIFACT) produces the artifact before
-        the critic-coach opens the session. Anonymous sessions are not supported.
+  returns: { session_id, mode, domain, opening_message }
+  note: classifier runs internally via LLM_MODEL_CLASSIFIER. Anonymous sessions are not
+        supported. In v1.1 the body grows an `artifact` field and mode accepts "critique".
 
 POST /chat                                      [SSE]
   body: { session_id,
@@ -1110,57 +1109,59 @@ A bash script under `deploy/deploy.sh` will wrap these once the first deploy lan
 
 ## What to Build First (MVP cut + stretch)
 
-The MVP slice is the minimum that lets us demo the brief's "show and do, don't tell" + "judge AI outputs" thesis across all three core domains. Ship MVP first; stretch items only after MVP is stable and deployed.
+The v1 MVP is the minimum that demonstrates the brief's "show and do, don't tell" thesis across all three core domains in Solving Mode. Critique Mode (the "judge AI outputs" axis) is designed and prompt-drafted but lands in v1.1, after v1 is stable in production.
 
 ### MVP (must ship before demo)
 
 **Infrastructure**
 
 1. **Plugin registry** — folder-scanning loader, manifest parser, tool dispatcher routing to backend tools or to the frontend bridge based on `execution`
-2. **Socratic base prompt** — `backend/app/prompts/socratic_base.txt`, shared across all domains for solving mode
-3. **Critic base prompt** — `backend/app/prompts/critic_base.txt`, used for critique mode
-4. **Core chat loop** — FastAPI `/chat` (SSE) + OpenRouter relay + session state in memory + JSON schema validation of agent output
-5. **Domain detection** — classifier call in `/session/new` via `LLM_MODEL_CLASSIFIER`
-6. **Frontend tool bridge** — SSE `frontend_tool` event, `tool_result` POST body, handler registry at `frontend/src/specializations/<domain>/handlers/`
+2. **Socratic base prompt** — `backend/app/prompts/socratic_base.txt`, shared across all domains
+3. **Core chat loop** — FastAPI `/chat` (SSE) + OpenRouter relay + session state in memory + JSON schema validation of agent output
+4. **Domain detection** — classifier call in `/session/new` via `LLM_MODEL_CLASSIFIER`
+5. **Frontend tool bridge** — SSE `frontend_tool` event, `tool_result` POST body, handler registry at `frontend/src/specializations/<domain>/handlers/`
 
-**Modes**
+**Solving mode**
 
-7. **Solving phase state machine** — clarification → decomposition → solving → wrap-up; agent emits transitions, backend validates
-8. **Critique mode** — artifact import + generated artifact path (via `LLM_MODEL_ARTIFACT`), phase machine (clarification → critique → synthesis → wrap-up), CritiqueArtifactPanel, CritiqueFindingsList
+6. **Solving phase state machine** — clarification → decomposition → solving → wrap-up; agent emits transitions, backend validates
 
 **Domains** (all three required for v1)
 
-9. **Math (school-level)** — algebra tool (backend, sympy), graph tool (backend, matplotlib), calibrated for linear equations, basic geometry, intro probability. NOT undergraduate.
-10. **Programming (intro Python)** — code_runner tool (frontend, Pyodide), PseudocodePad component for pre-code planning. Calibrated for first-time programmers: variables, loops, conditionals, simple functions.
-11. **Essay (paragraph-level)** — no tools; OutlineTree component for claim/evidence/warrant decomposition. Calibrated for school essays (one claim per paragraph, name your evidence, etc.).
+7. **Math (school-level)** — algebra tool (backend, sympy), graph tool (backend, matplotlib), calibrated for linear equations, basic geometry, intro probability. NOT undergraduate.
+8. **Programming (intro Python)** — code_runner tool (frontend, Pyodide), PseudocodePad component for pre-code planning. Calibrated for first-time programmers: variables, loops, conditionals, simple functions.
+9. **Essay (paragraph-level)** — no tools; OutlineTree component for claim/evidence/warrant decomposition. Calibrated for school essays (one claim per paragraph, name your evidence, etc.).
 
 **Cross-cutting product surface**
 
-12. **Persona onboarding (short)** — 2-question intake via `"persona"` specialization, stub persona file, inline `persona_updates` capture during sessions
-13. **SubproblemPanel + CritiqueArtifactPanel UI**
-14. **Hint ladder + escape hatch with reflection gate** — tracked in session state, escalates in agent's system prompt context
-15. **Reflection prompts** — periodic, self-correction follow-up, escape-hatch, wrap-up; with quality evaluation
-16. **Calibration (predict-then-check)** — CalibrationCheck directive, calibration_points in session state, summary in thinking trace
-17. **Specialization UI registry + ToolPane** — for `tool_result` and `agent_directive` component rendering; supports both backend and frontend tools
-18. **Thinking trace + ThinkingTraceDrawer** — narrative with understanding delta (solving) or critique delta (critique) as centrepiece
+10. **Persona onboarding (short)** — 2-question intake via `"persona"` specialization, stub persona file, inline `persona_updates` capture during sessions
+11. **SubproblemPanel UI**
+12. **Hint ladder + escape hatch with reflection gate** — tracked in session state, escalates in agent's system prompt context
+13. **Reflection prompts** — periodic, self-correction follow-up, escape-hatch, wrap-up; with quality evaluation
+14. **Calibration (predict-then-check)** — CalibrationCheck directive, calibration_points in session state, summary in thinking trace
+15. **Specialization UI registry + ToolPane** — for `tool_result` and `agent_directive` component rendering; supports both backend and frontend tools
+16. **Thinking trace + ThinkingTraceDrawer** — narrative with understanding delta as centrepiece
 
 **Ship**
 
-19. **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script
+17. **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script
 
-### Stretch (after MVP holds together)
+### v1.1 (first post-MVP release)
 
-20. **Seeded-flaw artifacts** — Critique mode's generated artifacts get a secondary editing pass that inserts a subtle error, raising critique difficulty
-21. **Science specialization** — graph + data table tools, calibrated for school physics/biology
-22. **General specialization** — fallback for queries that don't classify into math/programming/essay/science
+18. **Critique Mode** — wire `critic_base.txt`, add artifact import + generated artifact paths (via `LLM_MODEL_ARTIFACT`), add the critique phase machine (clarification → critique → synthesis → wrap_up), build CritiqueArtifactPanel and CritiqueFindingsList, surface the second entry path on the landing screen. Design is in "The Critique Loop" above and `critic_base.txt`.
+
+### v1.2+ (further additions, no fixed order)
+
+19. **Seeded-flaw artifacts** — Critique mode's generated artifacts get a secondary editing pass that inserts a subtle error, raising critique difficulty
+20. **Science specialization** — graph + data table tools, calibrated for school physics/biology
+21. **General specialization** — fallback for queries that don't classify into math/programming/essay/science
 
 ### Stop-the-line items
 
 The following are blockers that must hold throughout MVP development, not features to add:
 
-- **Agent Socratic discipline.** Every model output must be validated against the rules (never give the answer, one question at a time, etc.). Build a regression harness for this in `backend/tests/test_socratic_constraints.py` early — seeded dialogues + assertions on forbidden patterns. If the model drifts on a swap, this catches it. The harness covers BOTH base prompts (Socratic + Critic).
+- **Agent Socratic discipline.** Every model output must be validated against the rules (never give the answer, one question at a time, etc.). Build a regression harness for this in `backend/tests/test_socratic_constraints.py` early — seeded dialogues + assertions on forbidden patterns. If the model drifts on a swap, this catches it. v1 harness covers `socratic_base.txt` and the three v1 domain prompts; v1.1 expansion adds `critic_base.txt` coverage.
 - **Pyodide load weight.** First load is ~10 MB. Lazy-load only when the programming domain is active; show a one-time "loading Python..." indicator. If load fails, the code_runner gracefully degrades — the agent falls back to "let's trace through this by hand" mode (no tool call). Never block the chat on Pyodide.
-- **Three-domain prompt drift.** Each domain prompt must pass the Socratic regression harness independently, AND in critique mode. Plan one full review pass per domain prompt before deploy.
+- **Three-domain prompt drift.** Each v1 domain prompt must pass the Socratic regression harness. Plan one full review pass per domain prompt before deploy.
 
 ---
 
