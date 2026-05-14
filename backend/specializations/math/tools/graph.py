@@ -45,24 +45,31 @@ _Y_CLIP = 1e6
 
 
 def run(args: dict, session: Any) -> dict:
-    expression: str = (args.get("expression") or "").strip()
+    raw_expr = args.get("expression") or ""
+    # LLM may pass a list of expressions to overlay on one plot (e.g. ["2x+3", "7"]).
+    if isinstance(raw_expr, list):
+        expressions = [str(e).strip() for e in raw_expr if str(e).strip()]
+    else:
+        expressions = [str(raw_expr).strip()]
+
+    if not expressions:
+        return _error("No expression provided")
+
     x_range = args.get("x_range") or [-10, 10]
     variables: dict = args.get("variables") or {}
-    caption: str = (args.get("caption") or "").strip()
-
-    if not expression:
-        return _error("No expression provided")
+    caption: str = str(args.get("caption") or "").strip()
 
     if len(x_range) != 2 or x_range[0] >= x_range[1]:
         return _error("x_range must be [min, max] with min < max")
 
     try:
-        image_url, auto_caption = _render(expression, x_range, variables)
+        image_url, auto_caption = _render(expressions, x_range, variables)
     except Exception as exc:  # noqa: BLE001
         return _error(str(exc))
 
+    result_label = ", ".join(expressions)
     return {
-        "result": f"Graph of y = {expression}",
+        "result": f"Graph of {result_label}",
         "ui_component": "GraphView",
         "display_data": {
             "image_url": image_url,
@@ -83,49 +90,52 @@ def _error(msg: str) -> dict:
     }
 
 
-def _render(
-    expression: str,
-    x_range: list,
-    variables: dict,
-) -> tuple[str, str]:
-    """Plot expression over x_range, return (data-URL, auto_caption)."""
+def _eval_expr(expression: str, x_vals: np.ndarray, variables: dict) -> np.ndarray:
+    """Parse and evaluate one expression over x_vals; returns y array (NaN where undefined)."""
     sym_expr = parse_expr(expression, local_dict=_LOCALS, transformations=_TRANSFORMS)
-
-    # Substitute any provided variable values
     subs = {Symbol(k): float(v) for k, v in variables.items() if k != "x"}
     if subs:
         sym_expr = sym_expr.subs(subs)
-
-    # Build a fast numpy-backed callable
-    x_sym = Symbol("x")
-    f = lambdify(x_sym, sym_expr, modules=["numpy"])
-
-    x_vals = np.linspace(float(x_range[0]), float(x_range[1]), 500)
-
+    f = lambdify(Symbol("x"), sym_expr, modules=["numpy"])
     with np.errstate(divide="ignore", invalid="ignore"):
-        y_vals = np.asarray(f(x_vals), dtype=complex)
-
-    # Drop imaginary parts (e.g. sqrt of negative x values)
+        raw = f(x_vals)
+    # Constants (e.g. y=7) return a scalar — broadcast to match x_vals shape.
+    y_vals = np.broadcast_to(np.asarray(raw, dtype=complex), x_vals.shape).copy()
     real_mask = np.isreal(y_vals)
     y_plot = np.where(real_mask, y_vals.real, np.nan)
+    return np.where(np.abs(y_plot) > _Y_CLIP, np.nan, y_plot)
 
-    # Clip extreme values so asymptotes don't collapse the useful range
-    y_plot = np.where(np.abs(y_plot) > _Y_CLIP, np.nan, y_plot)
 
-    auto_caption = _caption(expression, variables)
-    image_url = _fig_to_dataurl(x_vals, y_plot, auto_caption, x_range)
+def _render(
+    expressions: list[str],
+    x_range: list,
+    variables: dict,
+) -> tuple[str, str]:
+    """Plot one or more expressions over x_range, return (data-URL, auto_caption)."""
+    x_vals = np.linspace(float(x_range[0]), float(x_range[1]), 500)
+    curves = [(expr, _eval_expr(expr, x_vals, variables)) for expr in expressions]
+    auto_caption = _caption(expressions, variables)
+    image_url = _fig_to_dataurl(x_vals, curves, auto_caption, x_range)
     return image_url, auto_caption
+
+
+_LINE_COLORS = ["#4f6df5", "#e05c2a", "#27a862", "#9b30d9", "#d4a017"]
 
 
 def _fig_to_dataurl(
     x_vals: np.ndarray,
-    y_vals: np.ndarray,
+    curves: list[tuple[str, np.ndarray]],
     caption: str,
     x_range: list,
 ) -> str:
     fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
 
-    ax.plot(x_vals, y_vals, linewidth=2, color="#4f6df5")
+    multi = len(curves) > 1
+    for i, (label, y_vals) in enumerate(curves):
+        color = _LINE_COLORS[i % len(_LINE_COLORS)]
+        ax.plot(x_vals, y_vals, linewidth=2, color=color,
+                label=f"y = {label}" if multi else None)
+
     ax.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.4)
     ax.axvline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.4)
     ax.set_xlim(x_range[0], x_range[1])
@@ -133,6 +143,8 @@ def _fig_to_dataurl(
     ax.set_ylabel("y")
     ax.set_title(caption, fontsize=11)
     ax.grid(True, alpha=0.3)
+    if multi:
+        ax.legend(fontsize=9)
     fig.tight_layout()
 
     buf = io.BytesIO()
@@ -144,8 +156,9 @@ def _fig_to_dataurl(
     return f"data:image/png;base64,{b64}"
 
 
-def _caption(expression: str, variables: dict) -> str:
+def _caption(expressions: list[str], variables: dict) -> str:
+    label = "  &  ".join(f"y = {e}" for e in expressions)
     if variables:
         subs_str = ", ".join(f"{k}={v}" for k, v in variables.items())
-        return f"y = {expression}  ({subs_str})"
-    return f"y = {expression}"
+        return f"{label}  ({subs_str})"
+    return label
