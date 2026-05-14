@@ -139,7 +139,9 @@ def test_chat_happy_path_phase_transition(client, fake_openrouter):
     assert "first piece" in body["reply"]
 
 
-def test_chat_rejects_illegal_phase_jump(client, fake_openrouter):
+def test_chat_clamps_illegal_phase_jump(client, fake_openrouter):
+    """Illegal phase jump (clarification → wrap_up) is clamped to current phase,
+    not rejected. See CLAUDE.md: "clamped to current phase with a warning log"."""
     fake_openrouter.responses = [
         _classifier_reply("math"),
         _agent_reply("What's your initial read?"),
@@ -152,8 +154,9 @@ def test_chat_rejects_illegal_phase_jump(client, fake_openrouter):
     resp = client.post(
         "/chat", json={"session_id": new["session_id"], "message": "I dunno"}
     )
-    assert resp.status_code == 400
-    assert "Illegal phase transition" in resp.json()["detail"]
+    assert resp.status_code == 200
+    # Phase is clamped back to clarification (illegal transition blocked).
+    assert resp.json()["phase"] == "clarification"
 
 
 def test_chat_clamps_hint_level_jump(client, fake_openrouter):
@@ -228,9 +231,9 @@ def test_chat_backend_tool_dispatch_round_trip(
     body = resp.json()
     # The final reply (after tool round-trip) is what the client sees.
     assert "What does that result tell you?" in body["reply"]
-    # backend_tool_result is surfaced.
-    assert body["backend_tool_result"] is not None
-    assert body["backend_tool_result"]["name"] == "algebra"
+    # tool_calls list carries the backend tool result.
+    assert len(body["tool_calls"]) > 0
+    assert body["tool_calls"][0]["name"] == "algebra"
 
 
 def test_chat_frontend_tool_surfaces_to_client(client, fake_openrouter):
@@ -256,7 +259,7 @@ def test_chat_frontend_tool_surfaces_to_client(client, fake_openrouter):
     assert body["frontend_tool_call"] is not None
     assert body["frontend_tool_call"]["name"] == "code_runner"
     assert body["frontend_tool_call"]["frontend_handler"] == "PyodideRunner"
-    assert body["backend_tool_result"] is None
+    assert body["tool_calls"] == []
 
 
 def test_chat_accepts_tool_result_after_frontend_call(client, fake_openrouter):
@@ -482,3 +485,119 @@ def test_tools_endpoint_404_unknown_tool(client, fake_openrouter):
         json={"session_id": new["session_id"], "args": {}},
     )
     assert resp.status_code == 404
+
+
+# ---- Auto-injection of CalibrationCheck / ReflectionPrompt directives -------
+
+
+def test_reflection_prompt_auto_injects_directive(client, fake_openrouter):
+    """When agent emits control.reflection_prompt, backend auto-injects a
+    ReflectionPrompt ui_directive so the widget renders even if the LLM didn't
+    format the full directive object."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your initial read?"),
+        _agent_reply(
+            "What felt different about your approach there?",
+            reflection_prompt={"trigger": "periodic", "question": "What felt different?"},
+        ),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    resp = client.post(
+        "/chat", json={"session_id": new["session_id"], "message": "I think I see it"}
+    )
+    assert resp.status_code == 200
+    directives = resp.json()["ui_directives"]
+    rp = [d for d in directives if d["component"] == "ReflectionPrompt"]
+    assert len(rp) == 1
+    assert rp[0]["domain"] == "general"
+    assert rp[0]["props"]["trigger"] == "periodic"
+    assert rp[0]["props"]["question"] == "What felt different?"
+
+
+def test_calibration_check_auto_injects_directive(client, fake_openrouter):
+    """When agent emits control.calibration_check string, backend auto-injects
+    a CalibrationCheck ui_directive."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your initial read?"),
+        _agent_reply(
+            "Before you try — how confident are you?",
+            calibration_check="Before you try sp-2 — how confident are you? 1 to 5.",
+        ),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    resp = client.post(
+        "/chat", json={"session_id": new["session_id"], "message": "I get the first part"}
+    )
+    assert resp.status_code == 200
+    directives = resp.json()["ui_directives"]
+    cc = [d for d in directives if d["component"] == "CalibrationCheck"]
+    assert len(cc) == 1
+    assert cc[0]["domain"] == "general"
+    assert "1 to 5" in cc[0]["props"]["question"]
+
+
+def test_calibration_check_blocks_wrap_up_on_same_turn(client, fake_openrouter):
+    """If agent emits both calibration_check and phase='wrap_up', the phase
+    transition is blocked so the student can answer before the session closes."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your initial read?"),
+        _agent_reply(
+            "Before you finish — how confident were you?",
+            calibration_check="How confident? 1 to 5.",
+            phase="wrap_up",  # backend should block this
+        ),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    resp = client.post(
+        "/chat", json={"session_id": new["session_id"], "message": "I think I got it"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Phase must NOT be wrap_up — the calibration question is still pending.
+    assert body["phase"] != "wrap_up"
+    # CalibrationCheck directive must still appear.
+    cc = [d for d in body["ui_directives"] if d["component"] == "CalibrationCheck"]
+    assert len(cc) == 1
+
+
+def test_no_double_inject_when_agent_already_emits_directive(client, fake_openrouter):
+    """If agent already emits a ReflectionPrompt in ui_directives AND sets
+    control.reflection_prompt, backend deduplicates — only one directive."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your initial read?"),
+        _agent_reply(
+            "Reflect on that.",
+            reflection_prompt={"trigger": "periodic", "question": "What changed?"},
+            # Agent also manually emits the directive (redundant but possible).
+            ui_directives=[{
+                "component": "ReflectionPrompt",
+                "domain": "general",
+                "props": {"question": "What changed?", "trigger": "periodic"},
+                "placement": "inline",
+                "lifetime": "until_next_turn",
+            }],
+        ),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    resp = client.post(
+        "/chat", json={"session_id": new["session_id"], "message": "ok"}
+    )
+    assert resp.status_code == 200
+    rp = [d for d in resp.json()["ui_directives"] if d["component"] == "ReflectionPrompt"]
+    assert len(rp) == 1, "Expected exactly one ReflectionPrompt directive, not two"

@@ -6,18 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-**Frontend and backend core loop are fully implemented and running end-to-end.** The Socratic chat loop works in production (OpenRouter → Gemini 2.5 Flash), phase transitions are validated, the subproblem panel updates live, and the thinking trace renders at wrap-up. Mock mode (`VITE_USE_MOCK=true`) runs a scripted 6-turn conversation without any API calls.
+**Frontend and backend core loop are fully implemented and running end-to-end.** The Socratic chat loop works in production (OpenRouter → Gemini 2.5 Flash), phase transitions are validated, the subproblem panel updates live, the thinking trace renders at wrap-up, LaTeX renders throughout, the algebra tool works, and CalibrationCheck/ReflectionPrompt widgets render inline in real-LLM mode. Mock mode (`VITE_USE_MOCK=true`) runs a scripted 7-turn conversation without any API calls.
 
 ### What is real and working
 
 - **Backend** — all FastAPI routes are real implementations (not placeholders): `/session/new` with classifier-based domain detection, `/chat` with full session state machine, `/persona/create`, `/persona/reset`, `/session/{id}/thinking-trace`, `/specializations`, `/tools/{tool_name}` dispatch. Plugin registry loads all specializations at startup.
-- **Frontend** — all views and components are implemented: `OnboardingView`, `SessionView`, `WrapUpView`, `ChatPane`, `SubproblemPanel`, `ToolPane`, `ThinkingTraceDrawer`, `HintBadge`, `ConfidenceWidget`. Error boundary in `App.tsx` catches render crashes. API client surfaces real backend error messages (not just "Something went wrong").
-- **Mock mode** — `mock.ts` runs a scripted 6-turn conversation (clarification → decomposition → solving → wrap_up) with inline directives, subproblem updates, and a rich thinking trace. Toggle via `VITE_USE_MOCK=true`.
-- **Phase machine** — illegal phase transitions (e.g. model jumping `clarification → wrap_up`) are clamped to current phase with a warning log rather than crashing the conversation.
+- **Frontend** — all views and components are implemented: `OnboardingView`, `SessionView`, `WrapUpView`, `ChatPane`, `SubproblemPanel`, `ToolPane`, `ThinkingTraceDrawer`, `HintBadge`, `ConfidenceWidget`, `CalibrationCheck`, `ReflectionPrompt`. Error boundary in `App.tsx` catches render crashes. API client surfaces real backend error messages (not just "Something went wrong").
+- **Mock mode** — `mock.ts` runs a scripted 7-turn conversation (clarification → decomposition → solving → wrap_up) with inline directives, subproblem updates, CalibrationCheck, ReflectionPrompt, and a rich thinking trace. Toggle via `VITE_USE_MOCK=true`.
+- **Phase machine** — illegal phase transitions (e.g. model jumping `clarification → wrap_up`) are clamped to current phase with a warning log rather than crashing the conversation. Bug fixed: `_apply_agent_response` no longer overwrites the already-validated phase (was re-applying the raw unclamped value).
+- **Math tools** — `algebra.py` is fully implemented (sympy) including implicit multiplication (`2x`, `3(x+1)`). `graph.py` raises `NotImplementedError` (still to implement).
+- **LaTeX rendering** — KaTeX renders throughout: chat messages, subproblem panel, thinking trace, RuleRecallPrompt, AlgebraSteps. All math is routed through `MathText.tsx` (react-markdown + remark-math + rehype-katex). Algebra tool uses `sympy.latex()` for step output.
+- **CalibrationCheck + ReflectionPrompt** — components render inline in the chat. Backend auto-injects the widgets: agent emits simple control fields (`calibration_check: "question"`, `reflection_prompt: {trigger, question}`) and the backend converts them to `ui_directives`. This is more reliable than requiring the LLM to format complex nested directive objects. Phase guard prevents `wrap_up` transition on the same turn as `calibration_check`.
+- **Tool-call loop** — fixed: unconditional assistant message before tool result, same-tool deduplication guard, tool result sent as `"role": "user"` (Gemini follows user-role instructions more reliably than system).
 
 ### What is still a stub
 
-- **Math tools** — `backend/specializations/math/tools/algebra.py` and `graph.py` raise `NotImplementedError`. If the model tries to call either tool the backend returns 500. Implement with sympy + matplotlib (see Priority 2 in "What to Build First").
+- **Math graph tool** — `backend/specializations/math/tools/graph.py` raises `NotImplementedError`. If the model tries to call it the backend returns 500. Implement with matplotlib.
 - **SSE streaming** — `stream_tutor()` in `backend/app/llm.py` raises `NotImplementedError`. All chat responses are currently non-streaming (full JSON on completion). Implement SSE for word-by-word streaming (see Priority 3).
 - **Regression harness** — `backend/tests/test_socratic_constraints.py` has the assertion helpers but no seeded dialogue test cases (see Priority 4).
 - **EC2 deploy** — not yet deployed; nginx + systemd setup documented below but not executed.
@@ -25,7 +29,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Next milestones (in order)
 
-1. Implement `algebra.py` (sympy) and `graph.py` (matplotlib) — see "What to Build First" Priority 2
+1. Implement `graph.py` (matplotlib) — see "What to Build First" Priority 2
 2. Implement SSE streaming in `stream_tutor()` and wire it into the frontend ChatPane
 3. Add seeded dialogue test cases to `test_socratic_constraints.py`
 4. Deploy to EC2
@@ -37,16 +41,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Backend (`backend/`)
 
 ```
-# install (editable, with dev + math extras)
-pip install -e ".[dev,math]"
+# install (editable, with dev + math extras) — use the venv
+venv/bin/pip install -e ".[dev,math]"
 
-# run the API (port 8000, auto-reload)
-uvicorn app.main:app --reload
+# run the API (port 8000, no --reload)
+venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
-# tests
-pytest
-pytest tests/test_plugin_registry.py        # single file
-pytest -k "test_socratic_constraint"        # single test by name
+# tests — MUST use venv/bin/pytest (system pytest uses Python 3.9; venv is 3.10)
+venv/bin/pytest
+venv/bin/pytest tests/test_chat_flow.py      # single file
+venv/bin/pytest -k "test_socratic"          # single test by name
 
 # lint / format
 ruff check .
@@ -92,15 +96,24 @@ Critical findings from the initial implementation pass. Read this before touchin
 **Do not use `--reload` with uvicorn.** The WatchFiles hot-reload caches old `.pyc` files and silently serves stale code. Always do a clean restart:
 
 ```bash
-# Kill any running Python processes first (Windows)
-Get-Process python* | Stop-Process -Force
-
-# Then start fresh (no --reload)
+# On Linux/Mac — kill running backend and restart
+pkill -f "uvicorn app.main" 2>/dev/null; sleep 1
 cd backend
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+**Always restart the backend after changing any `.py` file or `.txt` prompt.** Prompt changes in `socratic_base.txt` and domain `prompt.txt` files are loaded at startup — a running server will silently use stale prompts.
+
 Frontend Vite hot-reload works fine and does not have this problem.
+
+### Python version and venv
+
+The system `python3` and the system `pytest` binary (`/home/mrjithin/.local/bin/pytest`) use **Python 3.9**, which fails on pydantic v2 with `str | None` union syntax even with `from __future__ import annotations`. Always use the project venv at `backend/venv/` which is Python 3.10:
+
+```
+backend/venv/bin/python   ← 3.10, use for running the server and tests
+backend/venv/bin/pytest   ← must use this, not the system pytest
+```
 
 ### Environment configuration (`.env`)
 
@@ -138,6 +151,43 @@ The backend clamps illegal phase transitions (e.g. model jumping `clarification 
 ### Error visibility
 
 The frontend `api/client.ts` extracts the `detail` field from FastAPI error responses and includes it in the thrown `Error`. `SessionView` catches and displays this as `Error: <detail>` in the chat. This replaced the original generic "Something went wrong" message and is essential for diagnosing backend failures during development.
+
+### LaTeX rendering (MathText component)
+
+All math rendering goes through `frontend/src/components/MathText.tsx` — a thin wrapper around `react-markdown` + `remark-math` + `rehype-katex`. KaTeX CSS is bundled (`import "katex/dist/katex.min.css"` in `main.tsx`), not loaded from CDN.
+
+- `inline` prop: renders math in a `<span>` instead of a `<p>` (prevents nesting block elements inside inline contexts).
+- Used in: `ChatPane`, `SubproblemPanel`, `ThinkingTraceDrawer`, `AlgebraSteps`, `RuleRecallPrompt`, `ReflectionPrompt`.
+- The algebra backend tool uses `sympy.latex()` (not `str()`) so sympy output renders as proper LaTeX.
+
+For display math (`$$`), the expression must be on its own paragraph with surrounding blank lines — remark-math needs a paragraph boundary to detect block math.
+
+### Algebra tool — implicit multiplication
+
+`backend/specializations/math/tools/algebra.py` uses `sympy.parsing.sympy_parser.parse_expr` with the `implicit_multiplication_application` transform, so expressions like `2x`, `2x+3=7`, `3(x+1)=15` parse correctly. Do **not** revert to bare `sympify()` — it rejects implicit multiplication.
+
+### Tool-call loop fix (critical — do not revert)
+
+`backend/app/chat.py` `_run_chat_turn` has three guards that prevent infinite tool loops:
+
+1. **Unconditional assistant message** — added before the tool result every iteration. Skipping it (e.g. with `if parsed.reply:`) caused the model to see a tool result with no prior assistant message and re-issue the same call.
+2. **Same-tool dedup** — if the model calls the same tool twice in a row after already receiving its result, the loop breaks and returns the existing result.
+3. **`"role": "user"` for tool result** — Gemini follows instructions in user-role messages more reliably than system-role. The tool result message is sent as `role: "user"` with a `[SYSTEM]` prefix.
+
+### CalibrationCheck + ReflectionPrompt auto-injection
+
+The LLM reliably emits simple scalar fields but often skips complex nested `ui_directives` arrays. The backend auto-injects the widgets in `_build_chat_response`:
+
+- Agent emits `control.calibration_check: "question text"` → backend injects a `CalibrationCheck` directive with `domain: "general"`, `placement: "inline"`.
+- Agent emits `control.reflection_prompt: {trigger, question}` → backend injects a `ReflectionPrompt` directive (deduplicates if the agent also manually emitted one).
+
+Both injections deduplicate: if the agent already emitted a directive of that component name, the backend does not add a second one.
+
+**Phase guard**: if the agent emits `calibration_check` and `phase: "wrap_up"` on the same turn, the phase transition is blocked (`parsed.control.phase` is set to `None` before `_validate_phase`). This prevents the session from closing before the student answers the confidence question.
+
+### Phase clamping bug (fixed)
+
+`_apply_agent_response` previously re-applied `session.phase = control.phase` after the caller had already set `session.phase = _validate_phase(...)`. This meant clamped phases (e.g. illegal `clarification → wrap_up`) were silently overwritten with the raw invalid value. Fixed: `_apply_agent_response` no longer touches `session.phase` — the caller owns phase transitions.
 
 ---
 
@@ -1197,7 +1247,7 @@ The v1 MVP is the minimum that demonstrates the brief's "show and do, don't tell
 
 **Domains** (all three required for v1)
 
-7. 🔶 **Math (school-level)** — prompt and manifest wired; **algebra tool and graph tool are stubs** (raise `NotImplementedError`) — implement next
+7. 🔶 **Math (school-level)** — prompt and manifest wired; **algebra tool done** (sympy + implicit multiplication); **graph tool still a stub** (raises `NotImplementedError`) — implement next
 8. ⬜ **Programming (intro Python)** — prompt and manifest wired; Pyodide runner and PseudocodePad not yet exercised
 9. ⬜ **Essay (paragraph-level)** — prompt wired; OutlineTree component is a stub
 
@@ -1207,31 +1257,26 @@ The v1 MVP is the minimum that demonstrates the brief's "show and do, don't tell
 11. ✅ **SubproblemPanel UI** — live decomposition tree, status badges, hint count
 12. ✅ **Hint ladder + escape hatch** — tracked in session state; escape_hatch_triggered and escape_hatch_reflection fields in AgentControl
 13. ✅ **Thinking trace + ThinkingTraceDrawer** — narrative reflection at wrap-up with understanding delta
-14. ⬜ **Reflection prompts with quality evaluation** — fields exist in session schema; agent not yet reliably emitting them
-15. ⬜ **Calibration (predict-then-check)** — CalibrationCheck component stub exists; agent not yet reliably emitting directives
+14. ✅ **Reflection prompts with quality evaluation** — ReflectionPrompt component renders inline; backend auto-injects from `control.reflection_prompt`; quality evaluation fields wired in session schema
+15. ✅ **Calibration (predict-then-check)** — CalibrationCheck component renders inline; backend auto-injects from `control.calibration_check`; phase guard prevents premature wrap_up; directive_response records predicted confidence
 16. ✅ **Specialization UI registry + ToolPane** — registry.ts, ToolPane, inline/side_panel/modal directive placement all wired
 
 **Ship**
 
 17. ⬜ **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script documented below but not yet executed
 
-### Priority 2 — Math tools (implement next)
+### Priority 2 — Math graph tool (implement next)
 
-`backend/specializations/math/tools/algebra.py` — sympy CAS:
-```python
-def run(args: dict, session) -> dict:
-    # args: { expression: str, operation: "simplify|solve|diff|integrate" }
-    # returns: { result, ui_component: "AlgebraSteps", display_data: { steps: [{expr, rule}], final: str } }
-```
+`backend/specializations/math/tools/algebra.py` — **DONE**. Uses sympy `parse_expr` with `implicit_multiplication_application` transform; outputs `sympy.latex()` for each step. See "Algebra tool — implicit multiplication" in Implementation Notes.
 
-`backend/specializations/math/tools/graph.py` — matplotlib PNG:
+`backend/specializations/math/tools/graph.py` — **still a stub** (raises `NotImplementedError`). Implement with matplotlib PNG:
 ```python
 def run(args: dict, session) -> dict:
     # args: { expression: str, x_range: [number, number], variables: dict }
     # returns: { result, ui_component: "GraphView", display_data: { image_url: "data:image/png;base64,...", caption: str } }
 ```
 
-Both tools follow the existing dispatch pattern in `plugin_registry.py`. sympy, numpy, and matplotlib are all installed.
+Follows the existing dispatch pattern in `plugin_registry.py`. numpy and matplotlib are installed.
 
 ### Priority 3 — SSE streaming
 

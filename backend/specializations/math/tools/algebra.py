@@ -30,8 +30,12 @@ from sympy import (
     pi,
     simplify,
     sin,
-    sympify,
     tan,
+)
+from sympy.parsing.sympy_parser import (
+    implicit_multiplication_application,
+    parse_expr,
+    standard_transformations,
 )
 
 _LOCALS: dict[str, Any] = {
@@ -81,8 +85,12 @@ def _error(msg: str, expression: str) -> dict:
     }
 
 
+_TRANSFORMS = standard_transformations + (implicit_multiplication_application,)
+
+
 def _parse(expression: str) -> sympy.Expr:
-    return sympify(expression, locals=_LOCALS)
+    # implicit_multiplication_application handles "2x" → 2*x, "3(x+1)" → 3*(x+1), etc.
+    return parse_expr(expression, local_dict=_LOCALS, transformations=_TRANSFORMS)
 
 
 def _fmt(expr: sympy.Expr) -> str:

@@ -109,10 +109,10 @@ const SCRIPTED_TURNS: ChatResponse[] = [
     tool_calls: [],
     ui_directives: [],
   },
-  // Turn 5 — sp-1 solved, sp-2 active, confidence modal
+  // Turn 5 — sp-1 solved, sp-2 active + CalibrationCheck before attempt
   {
     reply:
-      "Exactly right — subtracting 3 from both sides gives 2x = 4. Now for the second part: how do you get x on its own?",
+      "Exactly right — subtracting 3 from both sides gives $2x = 4$. Before you tackle the next part: how do you get $x$ on its own?",
     phase: "solving",
     subproblems: [
       {
@@ -133,12 +133,61 @@ const SCRIPTED_TURNS: ChatResponse[] = [
       },
     ],
     tool_calls: [],
-    ui_directives: [],
+    ui_directives: [
+      {
+        component: "CalibrationCheck",
+        domain: "general",
+        props: {
+          question:
+            "Before you try sp-2 — how confident are you that you'll get this right?",
+        },
+        placement: "inline",
+        lifetime: "until_next_turn",
+      },
+    ],
   },
-  // Turn 6 — wrap up
+  // Turn 6 — sp-2 solved + ReflectionPrompt
   {
     reply:
-      "Perfect — x = 2. Can you now explain the full solution in your own words, start to finish?",
+      "Exactly — dividing both sides by 2 gives $x = 2$. Well done.",
+    phase: "solving",
+    subproblems: [
+      {
+        id: "sp-1",
+        description: "Isolate the variable term on one side",
+        goal: "Get 2x alone",
+        status: "solved",
+        hints_given: 1,
+        direct_answer_requested: false,
+      },
+      {
+        id: "sp-2",
+        description: "Divide both sides by the coefficient",
+        goal: "Find x",
+        status: "solved",
+        hints_given: 0,
+        direct_answer_requested: false,
+      },
+    ],
+    tool_calls: [],
+    ui_directives: [
+      {
+        component: "ReflectionPrompt",
+        domain: "general",
+        props: {
+          question:
+            "You solved both parts without hints on the second one. What felt different about how you approached sp-2 compared to sp-1?",
+          trigger: "periodic",
+        },
+        placement: "inline",
+        lifetime: "until_next_turn",
+      },
+    ],
+  },
+  // Turn 7 — wrap up
+  {
+    reply:
+      "Good reflection. Can you now explain the full solution in your own words, start to finish?",
     phase: "wrap_up",
     subproblems: [
       {

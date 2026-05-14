@@ -8,6 +8,8 @@ import * as math from "./math";
 import * as programming from "./programming";
 import * as essay from "./essay";
 import * as science from "./science";
+import CalibrationCheck from "../components/CalibrationCheck";
+import ReflectionPrompt from "../components/ReflectionPrompt";
 
 type AnyProps = Record<string, unknown>;
 
@@ -25,6 +27,9 @@ const registry: Record<string, ComponentType<AnyProps>> = {
   // science
   "science.GraphView": science.GraphView as ComponentType<AnyProps>,
   "science.DataTable": science.DataTable as ComponentType<AnyProps>,
+  // general (cross-domain)
+  "general.CalibrationCheck": CalibrationCheck as ComponentType<AnyProps>,
+  "general.ReflectionPrompt": ReflectionPrompt as ComponentType<AnyProps>,
 };
 
 export function lookup(key: string): ComponentType<AnyProps> | undefined {

@@ -84,6 +84,9 @@ class AgentControl(BaseModel):
     ui_directives: list[dict] = Field(default_factory=list)
     reflection_prompt: dict | None = None
     last_reflection_quality: Literal["shallow", "decent", "deep"] | None = None
+    # Simple string field — backend auto-injects the CalibrationCheck widget.
+    # Avoids requiring the LLM to format a complex nested ui_directive object.
+    calibration_check: str | None = None
     calibration_outcome: Literal["correct", "wrong", "partial"] | None = None
     persona_updates: list[dict] = Field(default_factory=list)
     self_correction_noted: bool = False
@@ -178,12 +181,11 @@ def _apply_subproblem_updates(session: Session, updates: list[dict]) -> None:
 
 
 def _apply_agent_response(session: Session, parsed: AgentResponse) -> None:
-    """Mutate the session in-place to reflect the agent's emitted control."""
+    """Mutate the session in-place to reflect the agent's emitted control.
+    Phase must be validated and applied by the caller BEFORE this is called;
+    this function skips the phase field intentionally to avoid overwriting the
+    validated phase with the raw (potentially clamped) value."""
     control = parsed.control
-
-    # Phase update (validated by caller).
-    if control.phase is not None:
-        session.phase = control.phase
 
     # Subproblems.
     _apply_subproblem_updates(session, control.subproblem_updates)
@@ -265,13 +267,42 @@ def _build_chat_response(
     backend_tool_result: dict | None = None,
     onboarding_complete: bool = False,
 ) -> ChatResponse:
+    directives = list(parsed.control.ui_directives)
+
+    # Auto-inject ReflectionPrompt widget when control.reflection_prompt is set,
+    # unless the agent already emitted one (dedup by component name).
+    rp = parsed.control.reflection_prompt
+    if rp and not any(d.get("component") == "ReflectionPrompt" for d in directives):
+        directives.append({
+            "component": "ReflectionPrompt",
+            "domain": "general",
+            "props": {
+                "question": rp.get("question", ""),
+                "trigger": rp.get("trigger", "periodic"),
+            },
+            "placement": "inline",
+            "lifetime": "until_next_turn",
+        })
+
+    # Auto-inject CalibrationCheck widget when control.calibration_check is set,
+    # unless the agent already emitted one.
+    cc = parsed.control.calibration_check
+    if cc and not any(d.get("component") == "CalibrationCheck" for d in directives):
+        directives.append({
+            "component": "CalibrationCheck",
+            "domain": "general",
+            "props": {"question": cc},
+            "placement": "inline",
+            "lifetime": "until_next_turn",
+        })
+
     return ChatResponse(
         reply=parsed.reply,
         phase=session.phase,
         domain=session.domain,
         subproblems=session.subproblems,
         active_subproblem=session.active_subproblem_id,
-        ui_directives=parsed.control.ui_directives,
+        ui_directives=directives,
         frontend_tool_call=frontend_tool_call,
         tool_calls=[backend_tool_result] if backend_tool_result else [],
         onboarding_complete=onboarding_complete,
@@ -506,6 +537,14 @@ async def chat(req: ChatRequest) -> ChatResponse:
         session.pending_frontend_tool = None
 
     parsed, frontend_tool, backend_tool_result = await _run_chat_turn(session)
+    # Phase guard: if the agent is asking for a calibration prediction this turn,
+    # don't let it also transition to wrap_up — the student hasn't answered yet.
+    if parsed.control.calibration_check and parsed.control.phase == "wrap_up":
+        _log.warning(
+            "session=%s blocked wrap_up phase transition on same turn as calibration_check",
+            req.session_id[:8],
+        )
+        parsed.control.phase = None
     session.phase = _validate_phase(session, parsed.control.phase)
     parsed.control.hint_level = _clamp_hint_level(session, parsed.control.hint_level)
     _apply_agent_response(session, parsed)
