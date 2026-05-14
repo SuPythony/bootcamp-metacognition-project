@@ -6,9 +6,71 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-**No code exists yet.** The repository contains only this design document and a `reflections/` folder (team journals, ignore for engineering work). The first implementation task will scaffold the layout described in "Repository Layout" below. Follow the order in "What to Build First" — the plugin registry and Socratic base prompt must land before any domain logic.
+**Scaffolded; no domain logic yet.** The repository now contains the full directory structure described in "Repository Layout" below, with stub files in place:
 
-When build, lint, and test tooling is added, document the commands here.
+- `backend/` — FastAPI app shell (`main.py`, `chat.py`, `persona.py`, `session.py`, `plugin_registry.py`, `llm.py`), the Socratic base prompt at `backend/app/prompts/socratic_base.txt`, and all six specializations (`math`, `programming`, `essay`, `science`, `general`, plus the reserved `persona` onboarding specialization) each with `__init__.py`, `prompt.txt`, and `manifest.json`. Math and programming carry tool stubs (`algebra.py`, `graph.py`, `code_runner.py`).
+- `frontend/` — Vite + React + Tailwind + TypeScript shell, typed API client at `src/api/` (`client.ts`, `types.ts`, `mock.ts`), the domain-agnostic component shells, the specialization registry at `src/specializations/registry.ts`, and per-domain `.tsx` component shells matching each `manifest.json`'s `ui_components` catalog.
+- `reflections/` — team journals, ignore for engineering work.
+
+What's a stub vs. what's real:
+
+- **Real and frozen**: directory layout, `manifest.json` schemas, `api/types.ts` shape, the Socratic base prompt, the dependency manifests (`pyproject.toml`, `package.json`).
+- **Stubs**: every FastAPI route returns placeholder responses; every React component renders a placeholder; tool modules raise `NotImplementedError`. The plugin registry's folder-scanning loader is not yet wired. The `mock.ts` layer exists but only covers the happy path of one endpoint.
+
+The scaffold reflects the proposed defaults in "Decisions Needed Before Implementation" (notably `sse-starlette` in backend deps and the `persona` specialization folder). The decisions section stays in place until the team has explicitly signed off.
+
+Build order from "What to Build First" still applies — the plugin registry loader and `/chat` relay are the next things to make real.
+
+---
+
+## Commands
+
+### Backend (`backend/`)
+
+```
+# install (editable, with dev + math extras)
+pip install -e ".[dev,math]"
+
+# run the API (port 8000, auto-reload)
+uvicorn app.main:app --reload
+
+# tests
+pytest
+pytest tests/test_plugin_registry.py        # single file
+pytest -k "test_socratic_constraint"        # single test by name
+
+# lint / format
+ruff check .
+ruff format .
+```
+
+Required env vars (see `backend/.env.example`):
+- `LLM_MODEL_TUTOR` — main tutor model identifier (OpenRouter)
+- `LLM_MODEL_CLASSIFIER` — cheap model for domain detection
+- `OPENROUTER_API_KEY`
+
+### Frontend (`frontend/`)
+
+```
+# install
+npm install
+
+# dev server (port 5173)
+npm run dev
+
+# typecheck
+npm run typecheck
+
+# production build
+npm run build
+npm run preview                              # serve the build locally
+```
+
+Required env vars (see `frontend/.env.example`):
+- `VITE_API_URL` — backend URL (default `http://localhost:8000`)
+- `VITE_USE_MOCK` — `true` to use the in-browser mock, `false` to hit the backend
+
+Frontend has no linter configured yet; rely on `tsc` via `npm run typecheck`.
 
 ---
 
