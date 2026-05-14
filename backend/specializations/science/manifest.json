@@ -6,6 +6,7 @@
     {
       "name": "graph",
       "description": "Plot student-provided data.",
+      "execution": "backend",
       "endpoint": "/tools/graph",
       "ui_component": "GraphView",
       "input_schema": {
@@ -18,6 +19,7 @@
     {
       "name": "data_table",
       "description": "Tabular view of a dataset for inspection.",
+      "execution": "backend",
       "endpoint": "/tools/data_table",
       "ui_component": "DataTable",
       "input_schema": {

@@ -87,7 +87,6 @@ The six integration-shape decisions below were debated and confirmed. They are n
 
 ### Open follow-ups (not blocking v1 build, but decide soon)
 
-- **Code runner sandboxing.** The `programming` specialization will execute student code via `/tools/run-code`. Choose: subprocess + `resource` limits + seccomp, Docker exec, or in-browser Pyodide. v1 must not leave this as "TODO sandbox" in production code.
 - **Type sync between frontend/backend.** Generate `frontend/src/api/types.ts` from FastAPI's OpenAPI schema rather than mirroring by hand. One-time setup, removes a whole class of drift bugs.
 - **History truncation.** v1 sends full `message_history` every turn. Acceptable for demos, breaks past ~50 turns. Defer to v2.
 - **Frontend lint.** No ESLint/Prettier configured yet. `npm run typecheck` (tsc) is the only frontend gate. Decide whether to add ESLint before deploy or accept tsc-only for v1.
@@ -235,7 +234,7 @@ The persona file is therefore **partial on day 1 and grows**. The system prompt 
 }
 ```
 
-Every non-trivial field is `{ value, inferred, evidence? }`. The agent reads inferred fields with appropriate uncertainty ("I've noticed you seem comfortable with X — does that feel right?") and can ask a confirming question to upgrade `inferred: true → inferred: false`.
+Convention: fields captured at onboarding (`age_band`, `school_level`, `initial_intent`) and metadata (`username`, `created_at`) are flat strings — they are direct answers from the student, not inferences. Every other field is `{ value, inferred, evidence? }` so the agent can flag inferred values as hypotheses. The agent reads inferred fields with appropriate uncertainty ("I've noticed you seem comfortable with X — does that feel right?") and can ask a confirming question to upgrade `inferred: true → inferred: false`.
 
 ### Persona injection (per session)
 
@@ -369,6 +368,7 @@ Kept server-side, passed back to LLM as context on each turn.
 ```
 
 - `mode` is fixed at `/session/new` and never changes within a session.
+- `domain` is one of the five user-facing specializations above. The `persona` specialization is a reserved internal domain used only for onboarding sessions — it is never returned by the classifier, never user-selectable, and the `internal: true` flag in its `manifest.json` excludes it from `GET /specializations`.
 - `artifact` is the AI-generated content under critique; only populated when `mode = critique`. Either the student pastes it, or the system generates it (see Critique Loop).
 - `phase` set differs by mode (see Modes below).
 - `critique_findings` are issues the student names; `verified` flips when the critic-coach agrees the issue is real after Socratic probing.
@@ -401,7 +401,7 @@ On the first user message, a fast classification call determines:
 - `domain`: math | programming | essay | science | general
 - `complexity_hint`: single-step | multi-step | open-ended
 
-This selects the **domain system prompt** and the available **UI components**.
+This selects the **domain system prompt** and the available **UI components**. (The `persona` specialization is reserved for onboarding only — never returned by the classifier and never user-selectable; see the note in "Session State Schema".)
 
 ---
 
@@ -475,7 +475,7 @@ Hint level is tracked in session state (`hints_per_subproblem`).
 When a subproblem requires:
 - **Algebra / symbolic manipulation** → call `/tools/algebra` (sympy), show steps in ToolPane
 - **Graphing** → call `/tools/graph`, render in ToolPane, let student interpret
-- **Code execution** → call `/tools/run-code`, show output, ask student to interpret it
+- **Code execution** → invoke the `code_runner` tool (runs in the browser via Pyodide; see "Generic tool dispatch"), show output in `CodeOutput`, ask student to interpret it
 - **Standard algorithm** → provide the implementation via tool, ask student to explain what it does
 
 The AI never presents tool output as "the answer." It presents it as data for the student to reason about.
@@ -592,9 +592,7 @@ backend/specializations/
   programming/
     __init__.py
     prompt.txt
-    tools/
-      code_runner.py
-    manifest.json
+    manifest.json        ← code_runner is a frontend tool (Pyodide); no backend tool files
   essay/
     __init__.py
     prompt.txt
@@ -683,6 +681,8 @@ backend/specializations/
 }
 ```
 
+Each tool entry declares `execution: "backend" | "frontend"`. Backend tools also declare `endpoint` (where the backend dispatches the call internally). Frontend tools also declare `frontend_handler`, naming the TypeScript handler under `frontend/src/specializations/<domain>/handlers/` that the client invokes when the `frontend_tool` SSE event fires. See "Generic tool dispatch" for the runtime flow.
+
 `tools[].ui_component` and entries in `ui_components` must reference the **same name** the frontend exports from `frontend/src/specializations/<domain>/`. The frontend's `registry.ts` maps `"<domain>.<ComponentName>"` to a React component. Names not present in the registry cause the frontend to log a warning and render a fallback — the chat itself must still proceed.
 
 `trigger` declares when a component appears:
@@ -717,7 +717,7 @@ POST /tools/{tool_name}
 **Frontend tools** (`execution: "frontend"`) — browser-side. Used for sandboxed code execution (Pyodide) and anything else better kept off the server. Flow:
 
 1. Agent emits `control.tool_call = { name: "code_runner", args: { ... } }` as usual.
-2. Backend recognises `execution: "frontend"` and forwards the call to the client by including it in the SSE `state` event under `control.frontend_tool_call`.
+2. Backend recognises `execution: "frontend"` and forwards the call by emitting an `event: frontend_tool` on the SSE stream with `{ "name": "code_runner", "args": { ... } }`. The `state` event still contains the agent's full `control` object — both events fire on the same turn, but `frontend_tool` is the imperative the client dispatches on.
 3. Frontend dispatches to the `frontend_handler` named in the manifest (e.g. `PyodideRunner`), captured in `frontend/src/specializations/<domain>/handlers/`.
 4. Result is sent back to the backend via `POST /chat` with a new body field: `tool_result: { name, result, display_data }`. The backend stores this in the session and replays it to the agent on the next LLM call.
 5. The matching `ui_component` (e.g. `CodeOutput`) renders the result in the `ToolPane`.
@@ -773,14 +773,15 @@ Backend prompt guidance for emitting directives lives in each domain's `prompt.t
 Backend half (`backend/specializations/{domain}/`):
 1. Create the folder.
 2. Write `prompt.txt` (Socratic rules auto-prepended). Include guidance on when to emit `ui_directives`.
-3. Implement any tools in `tools/` (or reuse existing ones via import).
-4. Write `manifest.json` — declare `tools` and the full `ui_components` catalog.
+3. Implement any backend tools in `tools/` (or reuse existing ones via import). Skip this if all tools are frontend (`execution: "frontend"`).
+4. Write `manifest.json` — declare `tools` (each with `execution: "backend" | "frontend"`; frontend tools also declare `frontend_handler`) and the full `ui_components` catalog.
 5. Register in `__init__.py`.
 
 Frontend half (`frontend/src/specializations/{domain}/`):
 6. Create the folder.
 7. Implement one `.tsx` component per entry in the manifest's `ui_components` list, with the declared props shape.
-8. Export them from a `index.ts` and add entries to `frontend/src/specializations/registry.ts` keyed `"<domain>.<ComponentName>"`.
+8. If any tool has `execution: "frontend"`, implement its handler at `frontend/src/specializations/<domain>/handlers/<HandlerName>.ts` and register it in `registry.ts` under the `"<domain>.<HandlerName>"` key.
+9. Export components from an `index.ts` and add entries to `frontend/src/specializations/registry.ts` keyed `"<domain>.<ComponentName>"`.
 
 The domain then appears automatically in detection, routing, and the `/specializations` discovery endpoint. No changes to `/chat`, `/session/new`, or any other specialization. If only the backend half is landed, the frontend renders a fallback when directives reference unknown components — work in progress is safe to merge.
 

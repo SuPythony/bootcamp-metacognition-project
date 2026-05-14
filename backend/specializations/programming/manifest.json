@@ -5,12 +5,12 @@
   "tools": [
     {
       "name": "code_runner",
-      "description": "Execute student-submitted code in a sandbox and return stdout/stderr.",
-      "endpoint": "/tools/code_runner",
+      "description": "Run a Python snippet in the browser via Pyodide and return stdout/stderr.",
+      "execution": "frontend",
+      "frontend_handler": "PyodideRunner",
       "ui_component": "CodeOutput",
       "input_schema": {
-        "language": "python",
-        "source": "string",
+        "code": "string",
         "stdin": "string?"
       }
     }
