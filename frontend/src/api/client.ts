@@ -20,13 +20,21 @@ async function post<TIn, TOut>(path: string, body: TIn): Promise<TOut> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try { detail = (await res.json()).detail ?? detail; } catch { /* ignore */ }
+    throw new Error(`${path} → ${detail}`);
+  }
   return res.json() as Promise<TOut>;
 }
 
 async function get<TOut>(path: string): Promise<TOut> {
   const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try { detail = (await res.json()).detail ?? detail; } catch { /* ignore */ }
+    throw new Error(`${path} → ${detail}`);
+  }
   return res.json() as Promise<TOut>;
 }
 

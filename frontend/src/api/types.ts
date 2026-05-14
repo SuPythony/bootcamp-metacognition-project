@@ -49,6 +49,7 @@ export interface ChatResponse {
 export interface SessionNewRequest {
   query: string;
   username: string;
+  mode?: "solving";
 }
 
 export interface SessionNewResponse {
