@@ -1,0 +1,57 @@
+{
+  "domain": "math",
+  "display_name": "Mathematics",
+  "complexity_hints": ["single-step", "multi-step", "open-ended"],
+  "tools": [
+    {
+      "name": "algebra",
+      "description": "Symbolic algebra and calculus via sympy",
+      "endpoint": "/tools/algebra",
+      "ui_component": "AlgebraSteps",
+      "input_schema": {
+        "expression": "string",
+        "operation": "simplify | solve | diff | integrate"
+      }
+    },
+    {
+      "name": "graph",
+      "description": "Plot a mathematical expression",
+      "endpoint": "/tools/graph",
+      "ui_component": "GraphView",
+      "input_schema": {
+        "expression": "string",
+        "x_range": "[number, number]",
+        "variables": "object"
+      }
+    }
+  ],
+  "ui_components": [
+    {
+      "name": "AlgebraSteps",
+      "description": "Step-by-step rendering of symbolic manipulation output.",
+      "props_schema": {
+        "steps": "Array<{ expr: string, rule: string }>",
+        "final": "string"
+      },
+      "trigger": "tool_result"
+    },
+    {
+      "name": "GraphView",
+      "description": "Renders a plot from a backend-rendered PNG or inline SVG.",
+      "props_schema": {
+        "image_url": "string",
+        "caption": "string?"
+      },
+      "trigger": "tool_result"
+    },
+    {
+      "name": "RuleRecallPrompt",
+      "description": "Inline card asking the student to state which rule applies before any algebraic step.",
+      "props_schema": {
+        "candidate_rules": "string[]",
+        "context_expr": "string"
+      },
+      "trigger": "agent_directive"
+    }
+  ]
+}

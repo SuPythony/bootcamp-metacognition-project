@@ -1,0 +1,39 @@
+{
+  "domain": "programming",
+  "display_name": "Programming",
+  "complexity_hints": ["single-step", "multi-step", "open-ended"],
+  "tools": [
+    {
+      "name": "code_runner",
+      "description": "Execute student-submitted code in a sandbox and return stdout/stderr.",
+      "endpoint": "/tools/code_runner",
+      "ui_component": "CodeOutput",
+      "input_schema": {
+        "language": "python",
+        "source": "string",
+        "stdin": "string?"
+      }
+    }
+  ],
+  "ui_components": [
+    {
+      "name": "CodeOutput",
+      "description": "Terminal-style rendering of code execution result.",
+      "props_schema": {
+        "stdout": "string",
+        "stderr": "string",
+        "exit_code": "number"
+      },
+      "trigger": "tool_result"
+    },
+    {
+      "name": "PseudocodePad",
+      "description": "Editable pad where the student drafts pseudocode before real code.",
+      "props_schema": {
+        "prompt": "string",
+        "initial_value": "string?"
+      },
+      "trigger": "agent_directive"
+    }
+  ]
+}

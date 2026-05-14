@@ -1,0 +1,50 @@
+{
+  "domain": "science",
+  "display_name": "Science",
+  "complexity_hints": ["single-step", "multi-step", "open-ended"],
+  "tools": [
+    {
+      "name": "graph",
+      "description": "Plot student-provided data.",
+      "endpoint": "/tools/graph",
+      "ui_component": "GraphView",
+      "input_schema": {
+        "x": "number[]",
+        "y": "number[]",
+        "x_label": "string?",
+        "y_label": "string?"
+      }
+    },
+    {
+      "name": "data_table",
+      "description": "Tabular view of a dataset for inspection.",
+      "endpoint": "/tools/data_table",
+      "ui_component": "DataTable",
+      "input_schema": {
+        "columns": "string[]",
+        "rows": "Array<Array<string|number>>"
+      }
+    }
+  ],
+  "ui_components": [
+    {
+      "name": "GraphView",
+      "description": "Renders a plot from data or a backend-rendered image.",
+      "props_schema": {
+        "image_url": "string?",
+        "data": "object?",
+        "caption": "string?"
+      },
+      "trigger": "tool_result"
+    },
+    {
+      "name": "DataTable",
+      "description": "Sortable table of rows for the student to inspect.",
+      "props_schema": {
+        "columns": "string[]",
+        "rows": "Array<Array<string|number>>"
+      },
+      "trigger": "tool_result"
+    }
+  ]
+}

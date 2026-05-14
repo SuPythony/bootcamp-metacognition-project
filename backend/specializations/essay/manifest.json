@@ -1,0 +1,16 @@
+{
+  "domain": "essay",
+  "display_name": "Essay & Writing",
+  "complexity_hints": ["multi-step", "open-ended"],
+  "tools": [],
+  "ui_components": [
+    {
+      "name": "OutlineTree",
+      "description": "Collapsible tree of the student's outline as it grows turn by turn.",
+      "props_schema": {
+        "nodes": "Array<{ id: string, parent_id: string?, label: string, claim: string? }>"
+      },
+      "trigger": "agent_directive"
+    }
+  ]
+}

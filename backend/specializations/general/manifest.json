@@ -1,0 +1,7 @@
+{
+  "domain": "general",
+  "display_name": "General",
+  "complexity_hints": ["single-step", "multi-step", "open-ended"],
+  "tools": [],
+  "ui_components": []
+}

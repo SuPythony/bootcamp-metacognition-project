@@ -1,0 +1,8 @@
+{
+  "domain": "persona",
+  "display_name": "Persona Onboarding",
+  "complexity_hints": ["multi-step"],
+  "tools": [],
+  "ui_components": [],
+  "internal": true
+}
