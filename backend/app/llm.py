@@ -11,8 +11,10 @@ before frontend wiring begins.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 from typing import Any
 
 import httpx
@@ -51,10 +53,12 @@ async def _post_chat(
     messages: list[dict],
     response_format: dict | None = None,
     timeout: float = 60.0,
+    _max_retries: int = 4,
 ) -> dict:
     """Single POST to OpenRouter's chat-completions endpoint. Raises LLMError
-    on non-2xx. Returns the parsed JSON body."""
-    payload: dict[str, Any] = {"model": model, "messages": messages}
+    on non-2xx. Retries up to _max_retries times on 429, honouring Retry-After."""
+    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "1024"))
+    payload: dict[str, Any] = {"model": model, "messages": messages, "max_tokens": max_tokens}
     if response_format is not None:
         payload["response_format"] = response_format
     headers = {
@@ -62,13 +66,19 @@ async def _post_chat(
         "Content-Type": "application/json",
     }
     url = f"{_base_url().rstrip('/')}/chat/completions"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-    if resp.status_code >= 400:
-        raise LLMError(
-            f"OpenRouter returned {resp.status_code}: {resp.text[:500]}"
-        )
-    return resp.json()
+    for attempt in range(_max_retries):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+        if resp.status_code == 429 and attempt < _max_retries - 1:
+            wait = float(resp.headers.get("Retry-After", 2 ** attempt))
+            await asyncio.sleep(min(wait, 30))
+            continue
+        if resp.status_code >= 400:
+            raise LLMError(
+                f"OpenRouter returned {resp.status_code}: {resp.text[:500]}"
+            )
+        return resp.json()
+    raise LLMError("OpenRouter rate-limit: exhausted retries")
 
 
 def _extract_content(response: dict) -> str:
@@ -77,6 +87,21 @@ def _extract_content(response: dict) -> str:
         return response["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as e:
         raise LLMError(f"Unexpected OpenRouter response shape: {response!r}") from e
+
+
+def _strip_fences(text: str) -> str:
+    """Extract JSON from a response that may contain markdown prose and code fences.
+
+    Prefers the last ```json block (models often append JSON after explanation),
+    then falls back to the last plain ``` block, then bare text.
+    """
+    matches = re.findall(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+    if matches:
+        return matches[-1]
+    matches = re.findall(r"```[^\n]*\n(.*?)\n?```", text, re.DOTALL)
+    if matches:
+        return matches[-1]
+    return text.strip()
 
 
 async def call_tutor(
@@ -99,7 +124,7 @@ async def call_tutor(
     response = await _post_chat(
         model=model, messages=messages, response_format=response_format
     )
-    content = _extract_content(response)
+    content = _strip_fences(_extract_content(response))
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -123,7 +148,7 @@ async def call_tutor(
     response = await _post_chat(
         model=model, messages=retry_messages, response_format=response_format
     )
-    content = _extract_content(response)
+    content = _strip_fences(_extract_content(response))
     try:
         return json.loads(content)
     except json.JSONDecodeError as e:
@@ -166,7 +191,7 @@ async def call_classifier(query: str) -> dict:
     response = await _post_chat(
         model=model, messages=messages, response_format=response_format
     )
-    content = _extract_content(response)
+    content = _strip_fences(_extract_content(response))
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError as e:

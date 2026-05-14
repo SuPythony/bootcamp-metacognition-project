@@ -6,18 +6,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-**Scaffolded; design expanded; no domain logic yet.** The repository now contains the full directory structure described in "Repository Layout" below, with stub files in place. The six locked-in decisions, Solving Mode, the Reflection & Calibration subsystem, short onboarding with passive persona capture, and AWS EC2 deployment shape v1. Critique Mode is designed and prompt-drafted (`critic_base.txt`) but deferred to v1.1.
+**Frontend and backend core loop are fully implemented and running end-to-end.** The Socratic chat loop works in production (OpenRouter → Gemini 2.5 Flash), phase transitions are validated, the subproblem panel updates live, and the thinking trace renders at wrap-up. Mock mode (`VITE_USE_MOCK=true`) runs a scripted 6-turn conversation without any API calls.
 
-- `backend/` — FastAPI app shell, the Socratic base prompt at `backend/app/prompts/socratic_base.txt`, the Critic-Coach base prompt at `backend/app/prompts/critic_base.txt` (kept on disk for v1.1; not loaded in v1), and all six specializations each with `__init__.py`, `prompt.txt`, and `manifest.json`. Math and programming carry tool stubs.
-- `frontend/` — Vite + React + Tailwind + TypeScript shell, typed API client (`client.ts`, `types.ts`, `mock.ts`), domain-agnostic component shells, specialization registry, per-domain `.tsx` component shells matching each `manifest.json`'s `ui_components` catalog.
-- `reflections/` — team journals, ignore for engineering work.
+### What is real and working
 
-What's a stub vs. what's real:
+- **Backend** — all FastAPI routes are real implementations (not placeholders): `/session/new` with classifier-based domain detection, `/chat` with full session state machine, `/persona/create`, `/persona/reset`, `/session/{id}/thinking-trace`, `/specializations`, `/tools/{tool_name}` dispatch. Plugin registry loads all specializations at startup.
+- **Frontend** — all views and components are implemented: `OnboardingView`, `SessionView`, `WrapUpView`, `ChatPane`, `SubproblemPanel`, `ToolPane`, `ThinkingTraceDrawer`, `HintBadge`, `ConfidenceWidget`. Error boundary in `App.tsx` catches render crashes. API client surfaces real backend error messages (not just "Something went wrong").
+- **Mock mode** — `mock.ts` runs a scripted 6-turn conversation (clarification → decomposition → solving → wrap_up) with inline directives, subproblem updates, and a rich thinking trace. Toggle via `VITE_USE_MOCK=true`.
+- **Phase machine** — illegal phase transitions (e.g. model jumping `clarification → wrap_up`) are clamped to current phase with a warning log rather than crashing the conversation.
 
-- **Real and frozen**: directory layout, manifest schemas, `api/types.ts` shape (needs an update pass for `mode` and the structured-output fields), dependency manifests, both base prompts (`socratic_base.txt` is v1; `critic_base.txt` is v1.1).
-- **Stubs**: FastAPI routes return placeholders; React components render placeholders; tool modules raise `NotImplementedError`; plugin registry loader is not wired; mock.ts only covers the happy path of one endpoint; critique-mode UI components are deferred to v1.1.
+### What is still a stub
 
-Next milestones, in order: plugin registry loader → `/chat` SSE relay with JSON-schema validation → math specialization (school-level) end-to-end in Solving Mode → prompt regression harness → programming (Pyodide) and essay domains → reflection & calibration subsystems → persona onboarding → deploy. See "What to Build First" for the full sequence.
+- **Math tools** — `backend/specializations/math/tools/algebra.py` and `graph.py` raise `NotImplementedError`. If the model tries to call either tool the backend returns 500. Implement with sympy + matplotlib (see Priority 2 in "What to Build First").
+- **SSE streaming** — `stream_tutor()` in `backend/app/llm.py` raises `NotImplementedError`. All chat responses are currently non-streaming (full JSON on completion). Implement SSE for word-by-word streaming (see Priority 3).
+- **Regression harness** — `backend/tests/test_socratic_constraints.py` has the assertion helpers but no seeded dialogue test cases (see Priority 4).
+- **EC2 deploy** — not yet deployed; nginx + systemd setup documented below but not executed.
+- **Critique Mode** — designed and prompt-drafted (`critic_base.txt`) but deferred to v1.1.
+
+### Next milestones (in order)
+
+1. Implement `algebra.py` (sympy) and `graph.py` (matplotlib) — see "What to Build First" Priority 2
+2. Implement SSE streaming in `stream_tutor()` and wire it into the frontend ChatPane
+3. Add seeded dialogue test cases to `test_socratic_constraints.py`
+4. Deploy to EC2
 
 ---
 
@@ -69,6 +80,64 @@ Required env vars (see `frontend/.env.example`):
 - `VITE_USE_MOCK` — `true` to use the in-browser mock, `false` to hit the backend
 
 Frontend has no linter configured yet; rely on `tsc` via `npm run typecheck`.
+
+---
+
+## Implementation Notes
+
+Critical findings from the initial implementation pass. Read this before touching the LLM or backend layer.
+
+### Running the servers
+
+**Do not use `--reload` with uvicorn.** The WatchFiles hot-reload caches old `.pyc` files and silently serves stale code. Always do a clean restart:
+
+```bash
+# Kill any running Python processes first (Windows)
+Get-Process python* | Stop-Process -Force
+
+# Then start fresh (no --reload)
+cd backend
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Frontend Vite hot-reload works fine and does not have this problem.
+
+### Environment configuration (`.env`)
+
+Current working configuration in `backend/.env`:
+
+```
+OPENROUTER_API_KEY=<key>
+LLM_MODEL_TUTOR=google/gemini-2.5-flash
+LLM_MODEL_CLASSIFIER=qwen/qwen3.6-flash
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+PERSONA_DIR=./personas
+ALLOWED_ORIGINS=http://localhost:5173
+LLM_MAX_TOKENS=2048
+```
+
+- `LLM_MAX_TOKENS=512` was too low — models need ~300 tokens for the reply + ~200 for the control JSON. Use 2048+.
+- `google/gemini-2.5-flash` is the recommended tutor model: free tier, 1M context, reliable instruction-following and JSON output.
+- `qwen/qwen3.6-flash` is fast and cheap for the simple classifier task.
+- `load_dotenv()` is called in `backend/app/main.py` at startup — `.env` is loaded automatically.
+
+### The `_strip_fences` fix (critical — do not revert)
+
+`backend/app/llm.py` contains `_strip_fences()`, applied to every model response before `json.loads()`. This is essential because `google/gemini-2.5-flash` (and many other models) ignores `json_object` response format and returns markdown prose followed by a ` ```json ` block at the end. Without `_strip_fences`, `json.loads()` fails on every response.
+
+The function uses `re.findall` to collect **all** ` ```json ` blocks and returns the **last** one — because earlier blocks may be math expressions or code examples, not the control JSON.
+
+### Phase transition clamping
+
+The backend clamps illegal phase transitions (e.g. model jumping `clarification → wrap_up`) to the current phase instead of raising HTTP 400. This is in `_validate_phase()` in `backend/app/chat.py`. The original design called for the frontend to soft-retry on 400, but that was not implemented; clamping is the pragmatic v1 fix. A warning is logged so the behaviour is observable.
+
+### Dev persona shortcut
+
+`backend/personas/testuser.json` is pre-created and committed. Using username `testuser` skips the 2-turn LLM-based onboarding entirely (the `/persona/create` endpoint returns `status: "exists"`), making local dev/testing much faster.
+
+### Error visibility
+
+The frontend `api/client.ts` extracts the `detail` field from FastAPI error responses and includes it in the thrown `Error`. `SessionView` catches and displays this as `Error: <detail>` in the chat. This replaced the original generic "Something went wrong" message and is essential for diagnosing backend failures during development.
 
 ---
 
@@ -1116,35 +1185,73 @@ The v1 MVP is the minimum that demonstrates the brief's "show and do, don't tell
 
 **Infrastructure**
 
-1. **Plugin registry** — folder-scanning loader, manifest parser, tool dispatcher routing to backend tools or to the frontend bridge based on `execution`
-2. **Socratic base prompt** — `backend/app/prompts/socratic_base.txt`, shared across all domains
-3. **Core chat loop** — FastAPI `/chat` (SSE) + OpenRouter relay + session state in memory + JSON schema validation of agent output
-4. **Domain detection** — classifier call in `/session/new` via `LLM_MODEL_CLASSIFIER`
-5. **Frontend tool bridge** — SSE `frontend_tool` event, `tool_result` POST body, handler registry at `frontend/src/specializations/<domain>/handlers/`
+1. ✅ **Plugin registry** — folder-scanning loader, manifest parser, tool dispatcher routing to backend tools or to the frontend bridge based on `execution`
+2. ✅ **Socratic base prompt** — `backend/app/prompts/socratic_base.txt`, shared across all domains
+3. ✅ **Core chat loop** — FastAPI `/chat` + OpenRouter relay + session state in memory + JSON schema validation of agent output (non-streaming; SSE is Priority 3)
+4. ✅ **Domain detection** — classifier call in `/session/new` via `LLM_MODEL_CLASSIFIER`
+5. ⬜ **Frontend tool bridge** — SSE `frontend_tool` event, `tool_result` POST body, handler registry at `frontend/src/specializations/<domain>/handlers/` (backend side wired; frontend dispatch not yet exercised because math tools are stubs)
 
 **Solving mode**
 
-6. **Solving phase state machine** — clarification → decomposition → solving → wrap-up; agent emits transitions, backend validates
+6. ✅ **Solving phase state machine** — clarification → decomposition → solving → wrap-up; agent emits transitions, backend clamps illegal ones
 
 **Domains** (all three required for v1)
 
-7. **Math (school-level)** — algebra tool (backend, sympy), graph tool (backend, matplotlib), calibrated for linear equations, basic geometry, intro probability. NOT undergraduate.
-8. **Programming (intro Python)** — code_runner tool (frontend, Pyodide), PseudocodePad component for pre-code planning. Calibrated for first-time programmers: variables, loops, conditionals, simple functions.
-9. **Essay (paragraph-level)** — no tools; OutlineTree component for claim/evidence/warrant decomposition. Calibrated for school essays (one claim per paragraph, name your evidence, etc.).
+7. 🔶 **Math (school-level)** — prompt and manifest wired; **algebra tool and graph tool are stubs** (raise `NotImplementedError`) — implement next
+8. ⬜ **Programming (intro Python)** — prompt and manifest wired; Pyodide runner and PseudocodePad not yet exercised
+9. ⬜ **Essay (paragraph-level)** — prompt wired; OutlineTree component is a stub
 
 **Cross-cutting product surface**
 
-10. **Persona onboarding (short)** — 2-question intake via `"persona"` specialization, stub persona file, inline `persona_updates` capture during sessions
-11. **SubproblemPanel UI**
-12. **Hint ladder + escape hatch with reflection gate** — tracked in session state, escalates in agent's system prompt context
-13. **Reflection prompts** — periodic, self-correction follow-up, escape-hatch, wrap-up; with quality evaluation
-14. **Calibration (predict-then-check)** — CalibrationCheck directive, calibration_points in session state, summary in thinking trace
-15. **Specialization UI registry + ToolPane** — for `tool_result` and `agent_directive` component rendering; supports both backend and frontend tools
-16. **Thinking trace + ThinkingTraceDrawer** — narrative with understanding delta as centrepiece
+10. ✅ **Persona onboarding (short)** — `/persona/create` returns `exists`/`pending`; 2-turn onboarding via `"persona"` domain works; passive `persona_updates` field wired in session
+11. ✅ **SubproblemPanel UI** — live decomposition tree, status badges, hint count
+12. ✅ **Hint ladder + escape hatch** — tracked in session state; escape_hatch_triggered and escape_hatch_reflection fields in AgentControl
+13. ✅ **Thinking trace + ThinkingTraceDrawer** — narrative reflection at wrap-up with understanding delta
+14. ⬜ **Reflection prompts with quality evaluation** — fields exist in session schema; agent not yet reliably emitting them
+15. ⬜ **Calibration (predict-then-check)** — CalibrationCheck component stub exists; agent not yet reliably emitting directives
+16. ✅ **Specialization UI registry + ToolPane** — registry.ts, ToolPane, inline/side_panel/modal directive placement all wired
 
 **Ship**
 
-17. **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script
+17. ⬜ **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script documented below but not yet executed
+
+### Priority 2 — Math tools (implement next)
+
+`backend/specializations/math/tools/algebra.py` — sympy CAS:
+```python
+def run(args: dict, session) -> dict:
+    # args: { expression: str, operation: "simplify|solve|diff|integrate" }
+    # returns: { result, ui_component: "AlgebraSteps", display_data: { steps: [{expr, rule}], final: str } }
+```
+
+`backend/specializations/math/tools/graph.py` — matplotlib PNG:
+```python
+def run(args: dict, session) -> dict:
+    # args: { expression: str, x_range: [number, number], variables: dict }
+    # returns: { result, ui_component: "GraphView", display_data: { image_url: "data:image/png;base64,...", caption: str } }
+```
+
+Both tools follow the existing dispatch pattern in `plugin_registry.py`. sympy, numpy, and matplotlib are all installed.
+
+### Priority 3 — SSE streaming
+
+`backend/app/llm.py` — implement `stream_tutor()`:
+- Call OpenRouter with `stream=True`
+- Yield `("token", delta)` tuples for content chunks
+- Accumulate full response, parse JSON, yield `("state", control_obj)` at end
+- On parse failure: retry once in non-streaming mode
+
+Frontend `ChatPane` needs to consume `token` events to show streaming text and the `state` event to update session state.
+
+### Priority 4 — Regression harness
+
+`backend/tests/test_socratic_constraints.py` — add at least 5 seeded dialogues per domain (math, programming, essay) asserting:
+- Agent never gives answer directly (`no_solution_leak`)
+- Agent asks only one question per turn (`one_question`)
+- Agent never enumerates subproblems (`no_enumeration`)
+- Hint escalation is sequential (no jump > +1)
+
+The assertion helpers (`one_question`, `no_solution_leak`, `no_enumeration`) are already in the file.
 
 ### v1.1 (first post-MVP release)
 

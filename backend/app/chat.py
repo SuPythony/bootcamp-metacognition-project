@@ -128,17 +128,16 @@ def _build_messages(session: Session, persona_ctx: str) -> list[dict]:
 
 
 def _validate_phase(session: Session, proposed: Phase | None) -> Phase:
-    """Returns the new phase. Raises HTTPException(400) on illegal transition."""
+    """Returns the new phase. Clamps illegal transitions to current phase with a warning."""
     if proposed is None or proposed == session.phase:
         return session.phase
     if not legal_next_phase(session.mode, session.domain, session.phase, proposed):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Illegal phase transition {session.phase!r} → {proposed!r} for "
-                f"mode={session.mode!r} domain={session.domain!r}"
-            ),
+        import logging
+        logging.getLogger("app.chat").warning(
+            "Illegal phase transition %r → %r clamped to %r (mode=%r domain=%r)",
+            session.phase, proposed, session.phase, session.mode, session.domain,
         )
+        return session.phase
     return proposed
 
 
