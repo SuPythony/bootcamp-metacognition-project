@@ -21,7 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### What is still a stub
 
-- **Math graph tool** — `backend/specializations/math/tools/graph.py` raises `NotImplementedError`. If the model tries to call it the backend returns 500. Implement with matplotlib.
+- **Math graph tool** — `backend/specializations/math/tools/graph.py` is implemented (matplotlib, base64 PNG). Was broken due to missing venv dependencies (`matplotlib`, `numpy`) — now installed.
 - **SSE streaming** — `stream_tutor()` in `backend/app/llm.py` raises `NotImplementedError`. All chat responses are currently non-streaming (full JSON on completion). Implement SSE for word-by-word streaming (see Priority 3).
 - **Regression harness** — `backend/tests/test_socratic_constraints.py` has the assertion helpers but no seeded dialogue test cases (see Priority 4).
 - **EC2 deploy** — not yet deployed; nginx + systemd setup documented below but not executed.
@@ -29,10 +29,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Next milestones (in order)
 
-1. Implement `graph.py` (matplotlib) — see "What to Build First" Priority 2
-2. Implement SSE streaming in `stream_tutor()` and wire it into the frontend ChatPane
-3. Add seeded dialogue test cases to `test_socratic_constraints.py`
-4. Deploy to EC2
+1. Implement SSE streaming in `stream_tutor()` and wire it into the frontend ChatPane
+2. Add seeded dialogue test cases to `test_socratic_constraints.py`
+3. Deploy to EC2
 
 ---
 
@@ -1247,7 +1246,7 @@ The v1 MVP is the minimum that demonstrates the brief's "show and do, don't tell
 
 **Domains** (all three required for v1)
 
-7. 🔶 **Math (school-level)** — prompt and manifest wired; **algebra tool done** (sympy + implicit multiplication); **graph tool still a stub** (raises `NotImplementedError`) — implement next
+7. ✅ **Math (school-level)** — prompt and manifest wired; algebra tool (sympy + implicit multiplication) and graph tool (matplotlib PNG + implicit multiplication) both implemented
 8. ⬜ **Programming (intro Python)** — prompt and manifest wired; Pyodide runner and PseudocodePad not yet exercised
 9. ⬜ **Essay (paragraph-level)** — prompt wired; OutlineTree component is a stub
 
@@ -1265,18 +1264,14 @@ The v1 MVP is the minimum that demonstrates the brief's "show and do, don't tell
 
 17. ⬜ **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script documented below but not yet executed
 
-### Priority 2 — Math graph tool (implement next)
+### Priority 2 — Math tools (DONE)
 
-`backend/specializations/math/tools/algebra.py` — **DONE**. Uses sympy `parse_expr` with `implicit_multiplication_application` transform; outputs `sympy.latex()` for each step. See "Algebra tool — implicit multiplication" in Implementation Notes.
+Both math tools are implemented:
 
-`backend/specializations/math/tools/graph.py` — **still a stub** (raises `NotImplementedError`). Implement with matplotlib PNG:
-```python
-def run(args: dict, session) -> dict:
-    # args: { expression: str, x_range: [number, number], variables: dict }
-    # returns: { result, ui_component: "GraphView", display_data: { image_url: "data:image/png;base64,...", caption: str } }
-```
+- `backend/specializations/math/tools/algebra.py` — sympy `parse_expr` with `implicit_multiplication_application`; outputs `sympy.latex()` per step.
+- `backend/specializations/math/tools/graph.py` — matplotlib Agg backend, plots over x_range, clips asymptotes, returns `data:image/png;base64` string. Also uses `implicit_multiplication_application` so `2x`, `3sin(x)` etc. work.
 
-Follows the existing dispatch pattern in `plugin_registry.py`. numpy and matplotlib are installed.
+Both require the venv (`matplotlib`, `numpy`, `sympy` installed via `venv/bin/pip install -e ".[dev,math]"`).
 
 ### Priority 3 — SSE streaming
 

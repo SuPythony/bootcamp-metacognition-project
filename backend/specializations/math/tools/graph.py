@@ -21,7 +21,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402 (must come after backend selection)
 import numpy as np
 import sympy
-from sympy import Symbol, lambdify, sympify
+from sympy import Symbol, lambdify
+from sympy.parsing.sympy_parser import (
+    implicit_multiplication_application,
+    parse_expr,
+    standard_transformations,
+)
 
 _LOCALS: dict[str, Any] = {
     name: Symbol(name) for name in "xyzabcnmt"
@@ -32,6 +37,8 @@ _LOCALS.update({
     "pi": sympy.pi, "e": sympy.E,
     "abs": sympy.Abs,
 })
+
+_TRANSFORMS = standard_transformations + (implicit_multiplication_application,)
 
 # Maximum y-distance rendered; clips asymptotes so the axes stay readable.
 _Y_CLIP = 1e6
@@ -82,7 +89,7 @@ def _render(
     variables: dict,
 ) -> tuple[str, str]:
     """Plot expression over x_range, return (data-URL, auto_caption)."""
-    sym_expr = sympify(expression, locals=_LOCALS)
+    sym_expr = parse_expr(expression, local_dict=_LOCALS, transformations=_TRANSFORMS)
 
     # Substitute any provided variable values
     subs = {Symbol(k): float(v) for k, v in variables.items() if k != "x"}
