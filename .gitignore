@@ -23,3 +23,5 @@ Thumbs.db
 # Personas (runtime user data)
 backend/personas/*
 !backend/personas/.gitkeep
+
+.claude/
