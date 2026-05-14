@@ -1,7 +1,7 @@
 # Day 2 Reflections
 
 **Today, I contributed most by...**
-Putting forward the initial structured idea in terms of 3 phases: framing the problem, working through it, and reflection. This gave the team a concrete starting point to improve on. The final design kept the spirit of that but generalized it to work across domains, not just coding.
+Putting forward the initial structured idea in terms of 3 phases: framing the problem, working through it, and reflection. This gave the team a concrete starting point to improve on. The final design kept the spirit of that but generalized it to work across domains, not just coding. Update: I prepared a [pitch](./programming-tutor-pitch.html) with a few more details worked out and presented it to the team.
 
 **One thing I understood clearly was...**
 The core principle the whole design rests on: the assistant shouldn't engage with the problem until the user has said something meaningful about their own understanding of it. This is what separates this from a normal chatbot.
