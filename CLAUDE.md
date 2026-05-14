@@ -6,20 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-**Scaffolded; no domain logic yet.** The repository now contains the full directory structure described in "Repository Layout" below, with stub files in place:
+**Scaffolded; design expanded; no domain logic yet.** The repository now contains the full directory structure described in "Repository Layout" below, with stub files in place. The six locked-in decisions and the new v1 design additions (Critique Mode, Reflection & Calibration subsystem, short onboarding with passive persona capture, AWS EC2 deployment) shape what gets built next.
 
-- `backend/` — FastAPI app shell (`main.py`, `chat.py`, `persona.py`, `session.py`, `plugin_registry.py`, `llm.py`), the Socratic base prompt at `backend/app/prompts/socratic_base.txt`, and all six specializations (`math`, `programming`, `essay`, `science`, `general`, plus the reserved `persona` onboarding specialization) each with `__init__.py`, `prompt.txt`, and `manifest.json`. Math and programming carry tool stubs (`algebra.py`, `graph.py`, `code_runner.py`).
-- `frontend/` — Vite + React + Tailwind + TypeScript shell, typed API client at `src/api/` (`client.ts`, `types.ts`, `mock.ts`), the domain-agnostic component shells, the specialization registry at `src/specializations/registry.ts`, and per-domain `.tsx` component shells matching each `manifest.json`'s `ui_components` catalog.
+- `backend/` — FastAPI app shell, the Socratic base prompt at `backend/app/prompts/socratic_base.txt`, the Critic-Coach base prompt at `backend/app/prompts/critic_base.txt`, and all six specializations each with `__init__.py`, `prompt.txt`, and `manifest.json`. Math and programming carry tool stubs.
+- `frontend/` — Vite + React + Tailwind + TypeScript shell, typed API client (`client.ts`, `types.ts`, `mock.ts`), domain-agnostic component shells, specialization registry, per-domain `.tsx` component shells matching each `manifest.json`'s `ui_components` catalog.
 - `reflections/` — team journals, ignore for engineering work.
 
 What's a stub vs. what's real:
 
-- **Real and frozen**: directory layout, `manifest.json` schemas, `api/types.ts` shape, the Socratic base prompt, the dependency manifests (`pyproject.toml`, `package.json`).
-- **Stubs**: every FastAPI route returns placeholder responses; every React component renders a placeholder; tool modules raise `NotImplementedError`. The plugin registry's folder-scanning loader is not yet wired. The `mock.ts` layer exists but only covers the happy path of one endpoint.
+- **Real and frozen**: directory layout, manifest schemas, `api/types.ts` shape (needs an update pass for mode/artifact/critique fields), dependency manifests, the two base prompts (socratic_base.txt and critic_base.txt).
+- **Stubs**: FastAPI routes return placeholders; React components render placeholders; tool modules raise `NotImplementedError`; plugin registry loader is not wired; mock.ts only covers the happy path of one endpoint; no critique-mode UI components exist yet.
 
-The scaffold reflects the proposed defaults in "Decisions Needed Before Implementation" (notably `sse-starlette` in backend deps and the `persona` specialization folder). The decisions section stays in place until the team has explicitly signed off.
-
-Build order from "What to Build First" still applies — the plugin registry loader and `/chat` relay are the next things to make real.
+Next milestones, in order: plugin registry loader → `/chat` SSE relay with JSON-schema validation → math specialization (school-level) end-to-end in solving mode → critique mode → deploy. See "What to Build First (MVP cut + stretch)" for the full sequence.
 
 ---
 
@@ -74,45 +72,16 @@ Frontend has no linter configured yet; rely on `tsc` via `npm run typecheck`.
 
 ---
 
-## Decisions Needed Before Implementation
+## Decisions (locked in)
 
-The six items below are integration-shape decisions. They affect both `frontend/` and `backend/`, and changing them mid-build is expensive. Each lists a **proposed default** — adopt it as written unless the team objects in a focused discussion. The rest of this document assumes these defaults; if a decision changes, update this section and the affected sections together in the same PR.
+The six integration-shape decisions below were debated and confirmed. They are now load-bearing for the rest of this doc — changes to any of them require updating dependent sections in the same PR.
 
-### 1. Agent structured output mechanism
-
-**Proposed default:** The agent returns a **single JSON object** matching a schema enforced by OpenRouter structured outputs (JSON Schema mode). Top-level shape: `{ "reply": "<student-facing text>", "control": { ... } }`. The `control` block carries phase transitions, subproblem updates, hint level, tool calls, and `ui_directives`. The Socratic base prompt defines the full schema.
-
-*Rationale:* one round-trip, one parse step, one place to validate. Tool-calling adds another protocol surface and varies more across models. If a selected model doesn't support JSON Schema, fall back to JSON mode + Pydantic parsing with a single retry on parse failure.
-
-### 2. Streaming
-
-**Proposed default:** **Server-Sent Events** on `/chat`. Two event types: `token` (incremental chunks of `reply` only) and `state` (the full validated `control` object, emitted once after the JSON parse completes). The frontend renders `reply` live as tokens arrive; structured state (phase, subproblems, directives) applies on `state`.
-
-*Rationale:* keeps the perceived latency low for chat text without making structured state streaming. Non-streaming JSON is the fallback if SSE proves fiddly with FastAPI + the chosen model.
-
-### 3. Agent decision authority
-
-**Proposed default:** The agent owns all phase transitions, hint-level escalation, subproblem creation, and tool-call decisions, and emits them in `control`. The backend is a **validator, not an arbiter**: it rejects illegal transitions (e.g. phase skip, hint-level jump > +1) and clamps where reasonable. The backend never silently overrides; on rejection it returns an error event the frontend surfaces as a soft retry.
-
-*Rationale:* keeps the teaching logic in the prompt where it can be iterated quickly. Avoids splitting Socratic rules across prompt and Python.
-
-### 4. Domain detection timing
-
-**Proposed default:** `/session/new` runs the classifier internally with `query` as input, using a **separate cheap model** (env var `LLM_MODEL_CLASSIFIER`, distinct from `LLM_MODEL_TUTOR`). The returned `domain` is final for the session. `query` is stored as the first entry in `message_history` so the tutor sees it on the first `/chat` turn. The `opening_message` in the response is the tutor's first reply (also produced inside `/session/new`).
-
-*Rationale:* one API call to start a session. Avoids a weird half-state where the frontend has a session but no domain yet.
-
-### 5. Onboarding mechanism
-
-**Proposed default:** Onboarding runs through **`/chat` with a reserved domain `"persona"`**, treated as a special specialization at `backend/specializations/persona/`. `/persona/create` returns `{ status: "exists" | "pending", session_id?, persona? }`. On `"pending"`, the frontend continues the interview via standard `/chat` calls against that `session_id`. On synthesis, the persona specialization emits a terminal `control.phase = "wrap_up"` plus a `persona` payload the backend writes to disk. The user is then routed to the tutor with a fresh `/session/new`.
-
-*Rationale:* reuses the chat plumbing instead of building a parallel onboarding protocol. The persona "specialization" is a natural fit — its prompt is just a different teacher persona.
-
-### 6. Username: required or optional
-
-**Proposed default:** **Required** on `/session/new`. No anonymous sessions in v1. Drops the nullable persona code path, makes onboarding always run on first contact, and matches the persona-first design.
-
-*Rationale:* the alternative (anonymous + optional persona) doubles the conditional surface for marginal value. v1 is for users who care enough to type a name.
+1. **Agent structured output** — single JSON object via OpenRouter structured outputs (JSON Schema mode). Shape: `{ "reply": "...", "control": { ... } }`. Fallback: JSON mode + Pydantic parsing with one retry on parse failure.
+2. **Streaming** — Server-Sent Events on `/chat`. Two event types: `token` (chunks of `reply`) and `state` (validated `control` object at end). Non-streaming JSON is the fallback if SSE proves fiddly.
+3. **Agent decision authority** — agent owns all phase transitions, hint escalation, subproblem creation, tool calls, mode-specific decisions. Backend is a validator: rejects illegal moves (phase skip, hint jump > +1), never silently overrides; rejection returns an error event the frontend handles as a soft retry.
+4. **Domain detection** — runs inside `/session/new` using `query` as input via `LLM_MODEL_CLASSIFIER` (a cheap model, separate from `LLM_MODEL_TUTOR`). `query` is stored as the first user message; `opening_message` is the tutor's first reply, produced in the same call.
+5. **Onboarding mechanism** — runs through `/chat` with reserved domain `"persona"` (a specialization at `backend/specializations/persona/`). See "Login & Persona Flow" for the shortened v1 flow.
+6. **Username required** on `/session/new`. No anonymous sessions in v1.
 
 ---
 
@@ -121,7 +90,7 @@ The six items below are integration-shape decisions. They affect both `frontend/
 - **Code runner sandboxing.** The `programming` specialization will execute student code via `/tools/run-code`. Choose: subprocess + `resource` limits + seccomp, Docker exec, or in-browser Pyodide. v1 must not leave this as "TODO sandbox" in production code.
 - **Type sync between frontend/backend.** Generate `frontend/src/api/types.ts` from FastAPI's OpenAPI schema rather than mirroring by hand. One-time setup, removes a whole class of drift bugs.
 - **History truncation.** v1 sends full `message_history` every turn. Acceptable for demos, breaks past ~50 turns. Defer to v2.
-- **Domain enum.** Standardize on `"math"` (matching the folder name) everywhere; the session state schema example currently uses `"mathematics"` — fix when scaffolding.
+- **Frontend lint.** No ESLint/Prettier configured yet. `npm run typecheck` (tsc) is the only frontend gate. Decide whether to add ESLint before deploy or accept tsc-only for v1.
 
 ---
 
@@ -207,65 +176,66 @@ bootcamp-metacognition-project/
 
 ## Project Overview
 
-A chat-first teaching assistant that:
-1. Identifies the query domain (math, programming, essay writing, science, etc.)
-2. Routes to a domain-specific system prompt and UI
-3. Walks the student through a structured **Socratic solving loop**
-4. Offloads mechanical sub-tasks (algebra, graphing, code execution) to backend tools
-5. Tracks session-level metrics on the student's problem-solving process
+A web-based learning tool for **teenagers (roughly 13–18)** that strengthens thinking skills which stay valuable in an AI-rich world: framing problems, checking understanding, calibrating confidence, reflecting on mistakes, and **judging AI outputs**. Built for the [Metacognition Vibe Coding Task](https://docs.tk.sg/Metacognition-Vibe-Coding-Task-551dd9d8b64483d7942101e280188fdb).
 
-**Current scope (v1)**: Solving loop + session metrics. Simple username-based persona persistence. No Firebase, no auth tokens.
+The product is two cooperating loops served from one chat interface:
+
+1. **Solving Mode** — student brings a school-level problem (algebra, intro programming, essay outline, science question). A Socratic tutor agent guides them to construct the solution themselves, never giving the answer. The "show and do, don't tell" mandate from the brief lives here.
+2. **Critique Mode** — student brings an AI-generated artifact (a ChatGPT solution, a code snippet, an essay draft) or asks for one to be generated. A Critic-Coach agent guides them to evaluate it: spot errors, surface what's missing, distinguish confident-sounding from correct. This is the "judging AI outputs" axis the brief specifically asks for.
+
+Both modes share the same plumbing — same `/chat` endpoint, same plugin system, same thinking-trace surface. They differ in agent prompt and the phase sequence they walk through.
+
+**Target audience constraints**:
+- Examples and tone calibrated for teens (school subjects, not undergraduate).
+- Short onboarding (2 questions max) to lower drop-off; remainder of the persona is captured passively from conversation.
+- Engagement loop matters: visible progress, agency in mode/domain choice, a thinking trace at the end that feels like a reward not a report card.
+
+**Current scope (v1)**:
+- Solving Mode + Critique Mode
+- Two specializations as MVP: `math` (school-level algebra and arithmetic) and `programming` (intro Python / pseudocode). `essay`, `science`, and `general` are scaffolded but not MVP — ship them only after MVP holds together.
+- Periodic reflection prompts + end-of-session thinking trace
+- Calibration tracking (predict-then-check)
+- Persona persistence per username, JSON files on disk
+- Deployed on the team's AWS EC2 instance (see "Deployment")
+- No auth tokens, no cloud DB, no cross-session learning
 
 ---
 
 ## Login & Persona Flow
 
-On first launch (or if no persona file exists for the user), the app runs a **one-time onboarding conversation** before routing to the main tutor. The persona is then saved to disk and reattached on every subsequent session — no re-asking.
+**Design intent**: get the student into a productive session as fast as possible. Onboarding asks the minimum, then the rest of the persona is **inferred passively** from how they talk during early sessions. Long form-based intake kills teen drop-off; this product never has one.
 
-### Onboarding flow
+### Onboarding flow (v1)
 
 1. User enters a username (no password — this is identity, not auth).
 2. App checks `backend/personas/{username}.json`. If it exists → skip to session.
-3. If not: start the **persona interview** — an LLM-driven conversational intake.
-4. After the interview, an LLM call synthesises responses into a structured persona file and saves it.
-5. Session begins with persona attached to the system prompt.
+3. If not: a 2-turn welcome runs via `/chat` against the reserved `"persona"` domain:
+   - Turn 1: "Hey, before we dive in — what's your age or school year?" *(Captures: age band, school level)*
+   - Turn 2: "Cool. What brings you here today — a specific problem, or just exploring?" *(Captures: initial intent, anchors the first session)*
+4. The persona agent writes a **stub persona** (age band + initial intent + `created_at` only) and routes the student into the first real session.
+5. From that session onward, every `/chat` response may include a `control.persona_updates` block that merges into the persona file: inferred education level (from problem complexity), inferred confident/difficult subjects (from which domains they pick and how they handle them), inferred learning style (from which hint levels land vs. miss). Fields gain an `inferred: true` flag when set this way.
 
-### Persona interview (LLM-driven)
-
-The intake is a short conversation, not a form. The LLM asks 5–8 questions, one at a time:
-
-```
-System: You are conducting a brief background intake for an AI tutoring app.
-Ask the student 5–8 questions, one at a time, to understand:
-- Their current educational level (school year, university, self-taught, etc.)
-- Subjects they feel confident in
-- Subjects they find difficult
-- How they prefer to learn (examples first, theory first, trial-and-error, etc.)
-- Any specific goals for using this tutor
-Do NOT ask for personal details. Keep each question short and conversational.
-When done, output ONLY a JSON object (no preamble) with the schema below.
-```
+The persona file is therefore **partial on day 1 and grows**. The system prompt always notes which fields are inferred vs. asked, so the agent treats inferred signals as hypotheses, not facts.
 
 ### Persona JSON schema (`backend/personas/{username}.json`)
 
 ```json
 {
   "username": "alex",
-  "created_at": "2025-01-01T00:00:00Z",
-  "education_level": "undergraduate | high_school | self_taught | professional | other",
-  "education_detail": "2nd year computer science",
-  "confident_subjects": ["linear algebra", "Python"],
-  "difficult_subjects": ["probability", "recursion"],
-  "learning_style": "examples_first | theory_first | trial_and_error | mixed",
-  "goals": "Prepare for algorithms exam in 3 weeks",
-  "preferred_pace": "slow | medium | fast",
-  "raw_responses": [
-    { "question": "...", "answer": "..." }
-  ]
+  "created_at": "2026-05-14T00:00:00Z",
+  "age_band": "13-15 | 16-18 | other",
+  "school_level": "lower_secondary | upper_secondary | other",
+  "initial_intent": "free-form sentence from onboarding turn 2",
+  "education_detail": { "value": "year 10", "inferred": false },
+  "confident_subjects": [{ "value": "linear equations", "inferred": true, "evidence": "solved sp-1 of session abc without hints" }],
+  "difficult_subjects": [{ "value": "word problems", "inferred": true, "evidence": "escape hatch used twice in session abc" }],
+  "learning_style": { "value": "examples_first", "inferred": true },
+  "preferred_pace": { "value": "medium", "inferred": true },
+  "goals": { "value": "pass next math test", "inferred": false }
 }
 ```
 
-`raw_responses` is kept for potential future reprocessing; only the structured fields are used in the system prompt.
+Every non-trivial field is `{ value, inferred, evidence? }`. The agent reads inferred fields with appropriate uncertainty ("I've noticed you seem comfortable with X — does that feel right?") and can ask a confirming question to upgrade `inferred: true → inferred: false`.
 
 ### Persona injection (per session)
 
@@ -356,10 +326,13 @@ Kept server-side, passed back to LLM as context on each turn.
 ```json
 {
   "session_id": "uuid",
-  "domain": "mathematics | programming | essay | science | general",
+  "mode": "solving | critique",
+  "domain": "math | programming | essay | science | general",
   "original_query": "...",
-  "phase": "clarification | decomposition | solving | wrap_up",
+  "artifact": null,
+  "phase": "clarification | decomposition | solving | critique | synthesis | wrap_up",
   "initial_understanding": "student's articulated understanding (captured in clarification phase)",
+  "initial_critique": null,
   "subproblems": [
     {
       "id": "sp-1",
@@ -367,10 +340,22 @@ Kept server-side, passed back to LLM as context on each turn.
       "goal": "what the student says this part should achieve",
       "status": "pending | active | solved",
       "hints_given": 0,
-      "direct_answer_requested": false
+      "direct_answer_requested": false,
+      "escape_hatch_reflection": null,
+      "confidence_score": null
     }
   ],
   "active_subproblem_index": 0,
+  "critique_findings": [
+    { "id": "f-1", "claim": "student-stated issue with the artifact", "kind": "factual_error | reasoning_gap | missing_step | overconfident_language | other", "verified": false }
+  ],
+  "calibration_points": [
+    { "subproblem_id": "sp-1", "predicted_confidence": 4, "outcome": "correct | wrong | partial", "noted_at": "iso8601" }
+  ],
+  "reflection_prompts": [
+    { "trigger": "periodic | self_correction | escape_hatch | wrap_up", "question": "...", "response": "...", "quality": "shallow | decent | deep | null" }
+  ],
+  "persona_updates_pending": [],
   "metrics": {
     "turns_total": 0,
     "clarification_turns": 0,
@@ -383,6 +368,27 @@ Kept server-side, passed back to LLM as context on each turn.
 }
 ```
 
+- `mode` is fixed at `/session/new` and never changes within a session.
+- `artifact` is the AI-generated content under critique; only populated when `mode = critique`. Either the student pastes it, or the system generates it (see Critique Loop).
+- `phase` set differs by mode (see Modes below).
+- `critique_findings` are issues the student names; `verified` flips when the critic-coach agrees the issue is real after Socratic probing.
+- `calibration_points` are predict-then-check records — see Reflection & Calibration subsystem.
+- `reflection_prompts` records every reflection the agent asks for, the student's answer, and the agent's later quality assessment of that answer.
+
+---
+
+## Modes
+
+A session is in one of two modes, fixed at creation time. Both share the same `/chat` plumbing, plugin system, and thinking-trace surface; the agent's system prompt and phase sequence change.
+
+### Solving Mode (default)
+The student brings a problem; the agent guides them to construct the solution. Phase sequence: `clarification → decomposition → solving → wrap_up`. The classic Socratic loop documented below.
+
+### Critique Mode
+The student brings (or asks the system to generate) an AI artifact — a worked solution, an essay paragraph, a code snippet — and the agent guides them to evaluate it. Phase sequence: `clarification → critique → synthesis → wrap_up`. This is the "judge AI outputs" axis the brief calls for. Full description in "The Critique Loop" below.
+
+The frontend exposes mode at session creation as a two-button choice on the landing screen: *"Bring a problem"* (solving) or *"Bring something an AI wrote"* (critique). A third path — *"Let the AI try first, then I'll critique it"* — creates a critique session whose `artifact` is generated by a separate non-Socratic LLM call seeded with the student's prompt.
+
 ---
 
 ## The Solving Loop (CRITICAL — core of the product)
@@ -392,7 +398,7 @@ This is the heart of the app. Every design decision should serve this flow.
 ### Phase 0 — Domain Detection (automatic, 1 LLM call)
 
 On the first user message, a fast classification call determines:
-- `domain`: mathematics | programming | essay | science | general
+- `domain`: math | programming | essay | science | general
 - `complexity_hint`: single-step | multi-step | open-ended
 
 This selects the **domain system prompt** and the available **UI components**.
@@ -502,6 +508,65 @@ After all subproblems are solved:
 1. AI asks the student to synthesize: *"Can you now explain the full solution in your own words?"*
 2. Compare their current explanation to their `initial_understanding` — surface the delta.
 3. Generate session metrics summary (see Metrics section).
+
+---
+
+## The Critique Loop (CRITICAL — second core flow)
+
+This is the second teaching loop and the product's strongest answer to the brief's "judge AI outputs" directive. Same Socratic discipline as Solving, inverted: the AI produces or imports the content; the student evaluates it.
+
+### Setup
+
+A critique session starts with an `artifact` — a worked AI solution, an essay, a code snippet, an explanation. Two ways it gets there:
+
+- **Imported**: student pastes content they got from another AI (ChatGPT, school chatbot, classmate's GPT use) into the input on the landing screen.
+- **Generated**: student types a prompt ("solve this differential equation", "write a paragraph arguing X"), and the backend calls a **separate, non-Socratic LLM** (`LLM_MODEL_ARTIFACT`, may be the same as `LLM_MODEL_TUTOR`) to produce the artifact. The system prompt for this call is *not* the Socratic base — the goal is to produce realistic AI output, including realistically subtle errors. The artifact may be deliberately seeded with one or two introduced flaws via a secondary editing pass (v2; v1 takes the LLM's first response unmodified).
+
+The artifact is stored in `session.artifact` and shown to the student in a dedicated `CritiqueArtifactPanel` on the left. The right side is the chat with the Critic-Coach.
+
+### Phase C0 — Initial Read (silent first impression)
+
+Before the coach engages, the student is asked for an `initial_critique` — one sentence: *"On first read, what's your gut feeling about this?"* This anchors a comparison at wrap-up, parallel to `initial_understanding` in solving.
+
+### Phase C1 — Clarification
+
+The coach asks the student to articulate what the artifact is *claiming*. Many critique failures happen because the student didn't parse the claim carefully. *"In your own words, what is this trying to convince you of?"* Captures their understanding before they evaluate.
+
+### Phase C2 — Critique (per finding, escalating depth)
+
+The student names issues; each becomes a `critique_finding`. For each finding:
+
+**C2a. Surface the finding.**
+The student says what they think is wrong. The coach **never confirms or denies on the spot**. *"Walk me through where you see that. What specifically in the text gave you that read?"*
+
+**C2b. Test the finding (the key Socratic move).**
+The coach probes: *"What would you expect to see if this part were correct?"* / *"Could there be a version of this where what they wrote is right?"* / *"How would you check?"* The student either strengthens the finding (verified = true) or retracts it (a self-correction — celebrated, noted in metrics).
+
+**C2c. Tool offload when applicable.**
+For math critiques, the coach may invoke the algebra tool to actually evaluate a step the student suspects. For code critiques, invoke the code runner on a suspicious section. Tool output is data, not verdict — the student interprets it.
+
+**C2d. Coverage check.**
+After the student says they're done, the coach asks once: *"Anything in this artifact you didn't look at carefully?"* This is the only place the coach may gently surface an issue the student missed — and only as a question, never as a statement. (*"What do you make of the third paragraph's claim about X?"* not *"They got X wrong."*)
+
+Hint ladder applies as in Solving: if the student is stuck on a finding (says "I dunno, something feels off"), the coach escalates by exactly one level per turn. Level 5 is *"have a closer look at [vague region]"* — never *"here's the bug."*
+
+### Phase C3 — Synthesis
+
+The student writes their final verdict on the artifact: *"In two or three sentences, what would you tell someone who was about to trust this?"* This `final_critique` is the analog of `final_understanding` in solving. The coach compares it to `initial_critique` — the delta is the learning.
+
+### Phase C4 — Wrap-Up
+
+Same as Solving's wrap-up: thinking-trace summary, but framed around critique quality:
+- *"You found N issues in this artifact. You retracted M of them after looking closer — that's calibration, not failure."*
+- *"At first you said: '[initial_critique]'. After working through it: '[final_critique]'. That shift is the skill."*
+- *"You missed [issue Z]. Worth knowing for next time — but you also caught [issue Y], which most people gloss over."*
+
+### Constraints on the Critic-Coach (must be in its base prompt)
+
+- **Never declare the artifact correct or incorrect overall.** Critique is per-claim; the synthesis is the student's call.
+- **Never name an issue the student hasn't approached.** Coverage check is the only exception, and only as an open question.
+- **Praise specifically.** "Good catch on the units" beats "great job." Teen calibration matters here.
+- **Self-corrections are wins.** A retracted finding is the metacognitive skill firing correctly; reflect that warmly back.
 
 ---
 
@@ -751,7 +816,48 @@ explanations offered unprompted.
   - CodeOutput (terminal-style)
 - **HintBadge** — subtle indicator on each subproblem node showing hint count
 - **ConfidenceWidget** — 1–5 star selector, shown after each subproblem closes
+- **CalibrationCheck** — 1–5 prediction asked *before* the student attempts a step (vs. ConfidenceWidget which fires after)
+- **ReflectionPrompt** — inline card asking a metacognitive question; the response goes back as `directive_response` and is evaluated by the agent
+- **CritiqueArtifactPanel** — shown in critique mode; renders the artifact under review
+- **CritiqueFindingsList** — running list of issues the student has named, with `verified` state from coach probing
 - **ThinkingTraceDrawer** — slides up at session end, shows narrative reflection
+
+---
+
+## Reflection & Calibration Subsystem
+
+Two threads run alongside both loops. They are the product's most direct answer to the brief's "handle uncertainty" and "reflect on mistakes" targets.
+
+### Periodic Reflection Prompts
+
+The agent emits a `ReflectionPrompt` directive at four trigger points:
+
+1. **Mid-session, periodic** — after every 2 closed subproblems (solving) or every 2 verified findings (critique). One question, calibrated to what just happened. Examples: *"What was different about how you approached sp-2 vs. sp-1?"* / *"You almost dropped that finding before catching it again — what made you take a second look?"*
+2. **Self-correction follow-up** — when `control.self_correction_noted = true`, the *next* turn asks: *"What made you change your mind?"* Cheap, high-value moment.
+3. **Escape hatch reflection** — the existing one-sentence gate before the answer is shown. Phase 3e of solving.
+4. **Wrap-up reflection** — the synthesis question that produces `final_understanding` / `final_critique`.
+
+Every reflection response is stored in `session.reflection_prompts` with the original question.
+
+### Reflection Quality Evaluation
+
+A reflection that says "I dunno, it just clicked" is less useful than one that says "I realized I was using the formula for X but the problem actually needed Y." The agent does a lightweight self-evaluation: on the turn *after* a reflection response, the agent sets `reflection_prompts[-1].quality` to `shallow | decent | deep` based on the response's content. If `shallow`, the agent follows up with one more probing question. **Maximum one follow-up per reflection** — no badgering.
+
+This evaluation happens inside the same JSON output (`control.last_reflection_quality`), not as a separate LLM call.
+
+### Calibration (Predict-then-Check)
+
+Before the student attempts a subproblem (solving) or commits to a finding (critique), the agent may emit a `CalibrationCheck` directive: *"Before you try — how confident are you that you'll get this right? 1 to 5."* The student's answer is stored as a `calibration_point.predicted_confidence`. After the attempt resolves, the agent records the `outcome` (correct / wrong / partial) on the same point.
+
+At wrap-up, the calibration trace becomes part of the thinking trace narrative:
+- *"You predicted 4/5 confidence on three steps. You got two of them. Your gut is slightly ahead of your accuracy — worth noticing."*
+- *"On the one you predicted 2/5, you actually nailed it. You knew more than you thought you did."*
+
+Calibration is a v1 must-have, not a stretch goal: it's the only feature that directly trains uncertainty handling, which the brief calls out as a core target behaviour. The agent emits CalibrationCheck on at least one subproblem per session.
+
+### Why these are in their own subsystem and not inside each loop
+
+Solving and Critique both produce reflection prompts and calibration points. Keeping the subsystem orthogonal to mode means we can tune reflection frequency and evaluation strictness in one place rather than two prompts. The Socratic base prompt owns the contract; per-mode prompts only describe when to trigger, not how.
 
 ---
 
@@ -766,13 +872,9 @@ Tracked automatically throughout the session. Shown as a reflection surface at w
 
 ```json
 {
+  "mode": "solving | critique",
   "total_turns": 24,
-  "phase_breakdown": {
-    "clarification": 3,
-    "decomposition": 5,
-    "solving": 14,
-    "wrap_up": 2
-  },
+  "phase_breakdown": { "clarification": 3, "decomposition": 5, "solving": 14, "wrap_up": 2 },
   "subproblems": [
     {
       "id": "sp-1",
@@ -783,23 +885,49 @@ Tracked automatically throughout the session. Shown as a reflection surface at w
       "confidence_score": 4
     }
   ],
+  "critique_findings": [
+    { "id": "f-1", "claim": "...", "kind": "factual_error", "verified": true, "was_self_corrected": false }
+  ],
+  "calibration_summary": {
+    "points": [{ "predicted": 4, "outcome": "correct" }, { "predicted": 2, "outcome": "correct" }],
+    "label": "well_calibrated | overconfident | underconfident | mixed",
+    "evidence": "AI-generated 1-sentence summary of the pattern"
+  },
+  "reflection_summary": {
+    "deep_reflections": 2,
+    "decent_reflections": 1,
+    "shallow_reflections": 0,
+    "highlights": ["one or two of the deepest reflection quotes"]
+  },
   "direct_answers_requested": 0,
   "self_corrections": 2,
   "initial_understanding": "I thought it was just about finding the roots",
   "final_understanding": "It's actually about the structure of the solution space",
   "understanding_delta_label": "significant | moderate | small",
-  "understanding_delta_evidence": "AI-generated 1-sentence comparison of initial vs final"
+  "understanding_delta_evidence": "AI-generated 1-sentence comparison of initial vs final",
+  "initial_critique": null,
+  "final_critique": null,
+  "critique_delta_label": null,
+  "critique_delta_evidence": null
 }
 ```
 
-**Displayed to student as a narrative reflection, not a dashboard:**
+`critique_findings`, `initial_critique`, `final_critique`, `critique_delta_*` are populated in critique mode. `subproblems`, `initial_understanding`, `final_understanding`, `understanding_delta_*` in solving mode. The other fields apply to both.
+
+**Displayed to student as a narrative reflection, not a dashboard.** Solving mode:
 - *"You broke the problem into N parts yourself and solved them in X turns."*
 - *"You used hints on 2 of the 3 subproblems — on the third you got it without any."*
 - *"At the start you said: '[initial_understanding]'. By the end you could explain: '[final_understanding]'. That shift is the learning."*
 - *"You corrected your own thinking twice — noticing your own mistakes is a skill."*
+- *"You predicted 4/5 confidence on three steps and got two — your gut is slightly ahead of your accuracy."*
 - If escape hatch was used: *"On one step you asked for the answer directly. You wrote: '[escape_hatch_reflection]'. That moment of knowing you were stuck is worth remembering."*
 
-The understanding delta between `initial_understanding` and `final_understanding` is the most important output of the whole session. It is visible proof of thinking, not just task completion. This is the feature to demo in the pitch.
+Critique mode:
+- *"You found N issues in this artifact. You retracted M of them after looking closer — that's calibration, not failure."*
+- *"At first you said: '[initial_critique]'. After working through it: '[final_critique]'."*
+- *"You missed [missed_issue]. Worth knowing — but you also caught [hardest_caught_issue], which most people gloss over."*
+
+The understanding delta (solving) or critique delta (critique) is the most important output of the whole session. It is visible proof of thinking, not just task completion. This is the feature to demo in the pitch.
 
 ---
 
@@ -807,28 +935,44 @@ The understanding delta between `initial_understanding` and `final_understanding
 
 ```
 POST /session/new
-  body: { query: string, username?: string }
-  returns: { session_id, domain, opening_message }
+  body: {
+    username: string,                          // required
+    mode: "solving" | "critique",              // required
+    query?: string,                            // required for solving and for "generate" critique
+    artifact?: { source: "imported", content: string }
+             | { source: "generate", prompt: string },  // required for critique mode
+  }
+  returns: { session_id, mode, domain, artifact?, opening_message }
+  note: classifier runs internally. For critique mode with source="generate",
+        a separate LLM call (LLM_MODEL_ARTIFACT) produces the artifact before
+        the critic-coach opens the session. Anonymous sessions are not supported.
 
-POST /chat
+POST /chat                                      [SSE]
   body: { session_id, message?: string, directive_response?: { component, value } }
-  returns: { reply, phase, subproblems, tool_calls: [], ui_directives: [] }
+  events:
+    event: token   data: { delta: "..." }       // streamed chunks of reply
+    event: state   data: { control: { ... } }   // emitted once at end; validated control object
+    event: error   data: { code, message }      // if the agent's output failed validation; client retries
   note: either message or directive_response must be present. See "Specialization UI Contract"
-        for the ui_directives shape; tool_calls carry the same ui_component / display_data fields
-        the /tools/{name} endpoint returns.
+        and the structured-output schemas in socratic_base.txt / critic_base.txt for the
+        control shape (it differs by mode).
 
 POST /tools/{tool_name}
   body: { session_id, ...tool-specific args }
   returns: { result, ui_component, display_data }
-  note: tool_name must be registered in the active domain's manifest.json
+  note: tool_name must be registered in the active domain's manifest.json. Backend invokes
+        these on the agent's behalf when control.tool_call is set; the result is replayed
+        into the next turn's context. The frontend does not call this endpoint directly in v1.
 
 GET /session/{session_id}/thinking-trace
   returns: { ...thinking trace object }
+  note: shape varies by mode; see "Thinking Trace" section
 
 POST /persona/create
   body: { username: string }
-  returns: { status: "exists" | "created", persona }
-  note: if persona doesn't exist, triggers LLM onboarding interview
+  returns: { status: "exists" | "pending", session_id?, persona? }
+  note: on "pending", a short onboarding session_id is created; the frontend continues via
+        /chat against the "persona" domain. On "exists", returns the stored persona.
 
 POST /persona/reset
   body: { username: string }
@@ -890,32 +1034,94 @@ Phase transitions are detected by the LLM (via a structured output call) or trig
 
 ---
 
-## What to Build First (Recommended Order)
+## Deployment
+
+The product runs on the team's **AWS EC2 instance** (instance details in team channel, not in this repo).
+
+### Topology
+
+- One EC2 host runs both backend (FastAPI on port 8000) and frontend (static build served by nginx on port 80/443).
+- Nginx is the public-facing entry: serves frontend static files, reverse-proxies `/api/*` to the FastAPI on 127.0.0.1:8000 (so SSE works without CORS gymnastics).
+- HTTPS via Let's Encrypt (`certbot --nginx`). Re-uses the EC2 instance's public DNS or a team-provided subdomain.
+- No load balancer, no autoscaling — this is a demo box.
+
+### Process management
+
+- Backend: `systemd` unit running `uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1`. Single worker because session state is in-memory; sticky sessions on multiple workers would need shared storage (out of scope for v1).
+- Frontend: built into `frontend/dist/` at deploy time, served as static files. No node process in production.
+- Logs to journald; `journalctl -u socratic-tutor` reads them.
+
+### Env vars
+
+- Backend: `LLM_MODEL_TUTOR`, `LLM_MODEL_CLASSIFIER`, `LLM_MODEL_ARTIFACT`, `OPENROUTER_API_KEY`, `PERSONA_DIR` (defaults to `backend/personas/`), `ALLOWED_ORIGINS` (CSV, defaults to the public hostname).
+- Frontend: built with `VITE_API_URL=/api` and `VITE_USE_MOCK=false`. The frontend never talks directly to OpenRouter.
+
+### Secrets
+
+- `OPENROUTER_API_KEY` lives in `/etc/socratic-tutor.env` (`chmod 600`, owned by the service user). Read by the systemd unit via `EnvironmentFile=`. Never in the repo, never in a Docker image.
+
+### Deploy steps (manual v1)
+
+1. SSH to EC2.
+2. `git pull` in the deploy directory.
+3. Backend: `pip install -e ".[dev,math]"`, then `sudo systemctl restart socratic-tutor`.
+4. Frontend: `npm install && npm run build`, then `sudo cp -r frontend/dist/* /var/www/socratic-tutor/`.
+5. `sudo nginx -t && sudo systemctl reload nginx`.
+
+A bash script under `deploy/deploy.sh` will wrap these once the first deploy lands. CI/CD is out of scope for v1.
+
+### Persona files in production
+
+`backend/personas/*.json` is the only on-disk state. It survives restarts because it's a regular directory, not a tmpfs. Back up periodically by snapshotting the directory (a daily `tar.gz` to `~/persona-backups/` via cron is fine for v1). If the host is rebuilt, persona files must be preserved out-of-band — they are the only thing in this system that can't be regenerated.
+
+---
+
+## What to Build First (MVP cut + stretch)
+
+The MVP slice is the minimum that lets us demo the brief's "show and do, don't tell" + "judge AI outputs" thesis with one domain end-to-end. Ship MVP first; stretch items only after MVP is stable and deployed.
+
+### MVP (must ship before demo)
 
 1. **Plugin registry** — folder-scanning loader, manifest parser, tool dispatcher (`/tools/{tool_name}`)
-2. **Socratic base prompt** — `backend/app/prompts/socratic_base.txt`, shared across all domains
-3. **Core chat loop** — FastAPI `/chat` + OpenRouter relay + session state in memory
-4. **Domain detection** — simple classification prompt, returns domain enum; validated against registered plugins
-5. **First specialization (math)** — algebra + graph tools, as a reference implementation for the plugin pattern
-6. **Remaining specializations** — programming, essay, science, general (each as a plugin)
-7. **Phase state machine** — clarification → decomposition → solving → wrap-up
-8. **Persona onboarding** — LLM-driven interview, `backend/personas/{username}.json` persistence, `/persona/create` + `/persona/reset`
-9. **Persona injection** — attach to system prompt on session start
-10. **SubproblemPanel UI** — renders decomposition tree, updates live
-11. **Hint ladder** — tracked in session state, escalates in system prompt context
-12. **Specialization UI registry + ToolPane** — `frontend/src/specializations/registry.ts` lookup; ToolPane slides in for `tool_result`-triggered components; inline renderer handles `agent_directive`-triggered components from `/chat` `ui_directives`. Round-trips user input back via `directive_response`.
-13. **Confidence widget** — post-subproblem check-in
-14. **Thinking trace + ThinkingTraceDrawer** — session narrative at wrap-up, understanding delta as centrepiece
-15. **Escape hatch with reflection gate** — confirmed twice, reflection sentence required before answer is given
+2. **Socratic base prompt** — `backend/app/prompts/socratic_base.txt`, shared across all domains and modes
+3. **Critic base prompt** — `backend/app/prompts/critic_base.txt`, used in critique mode
+4. **Core chat loop** — FastAPI `/chat` (SSE) + OpenRouter relay + session state in memory + JSON schema validation of agent output
+5. **Domain detection** — classifier call in `/session/new` via `LLM_MODEL_CLASSIFIER`
+6. **First domain: math (school-level)** — algebra tool, plot tool, calibrated for ages 13–18 (linear equations, basic geometry, intro probability, NOT undergraduate)
+7. **Solving phase state machine** — clarification → decomposition → solving → wrap-up; agent emits transitions, backend validates
+8. **Critique mode** — artifact import + generated artifact path, phase machine (clarification → critique → synthesis → wrap-up), CritiqueArtifactPanel, CritiqueFindingsList
+9. **Persona onboarding (short)** — 2-question intake via `"persona"` specialization, stub persona file, inline `persona_updates` capture during sessions
+10. **SubproblemPanel + CritiqueArtifactPanel UI**
+11. **Hint ladder + escape hatch with reflection gate** — tracked in session state, escalates in agent's system prompt context
+12. **Reflection prompts** — periodic, self-correction follow-up, escape-hatch, wrap-up; with quality evaluation
+13. **Calibration (predict-then-check)** — CalibrationCheck directive, calibration_points in session state, summary in thinking trace
+14. **Specialization UI registry + ToolPane** — for tool_result and agent_directive component rendering
+15. **Thinking trace + ThinkingTraceDrawer** — narrative with understanding delta (solving) or critique delta (critique) as centrepiece
+16. **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script
+
+### Stretch (after MVP holds together)
+
+17. **Second domain: programming (intro)** — Pseudocode pad, code runner (sandboxed), calibrated for first-time programmers
+18. **Seeded-flaw artifacts** — Critique mode's generated artifacts get a secondary editing pass that inserts a subtle error, raising critique difficulty
+19. **Essay, science, general specializations** — already scaffolded; flesh out prompts and any required tools
+
+### Stop-the-line items
+
+The following are blockers that must hold throughout MVP development, not features to add:
+
+- **Agent Socratic discipline.** Every model output must be validated against the rules (never give the answer, one question at a time, etc.). Build a regression harness for this in `backend/tests/test_socratic_constraints.py` early — seeded dialogues + assertions on forbidden patterns. If the model drifts on a swap, this catches it.
+- **Code runner sandbox.** Stretch item 17 ships only after sandboxing is real (subprocess + resource limits + read-only FS at minimum). No "TODO sandbox" in production code.
 
 ---
 
 ## Out of Scope (v1)
 
 - User login with passwords / auth tokens
-- Firebase / cloud storage (personas are local JSON files)
-- Cross-session learning (persona is static once created; no session-to-session updates)
-- Age/experience adaptation beyond what the persona provides
-- Real-time persona updates mid-session
+- Firebase / cloud storage (personas are local JSON files on the EC2 disk)
+- Cross-session learning (persona accumulates inferred fields, but agent does not adapt strategy across sessions)
+- Multi-user concurrency stress (single worker, in-memory sessions — fine for demo, not for class rollout)
+- Persona editing UI
+- Teacher / parent dashboards
+- Mobile-optimised layout (responsive enough not to break, but desktop-first)
 
 These are documented for v2 but should not influence v1 architecture decisions. Keep session state in-memory and stateless across restarts, except for persona files.
