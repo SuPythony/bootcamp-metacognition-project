@@ -86,7 +86,7 @@ def _parse(expression: str) -> sympy.Expr:
 
 
 def _fmt(expr: sympy.Expr) -> str:
-    return str(expr)
+    return sympy.latex(expr)
 
 
 def _pick_var(expr: sympy.Expr, hint: str | None) -> Symbol:
@@ -123,8 +123,8 @@ def _compute(
 # ---------------------------------------------------------------------------
 
 def _op_simplify(expression: str, _variable: str | None) -> tuple[list[dict], str]:
-    steps: list[dict] = [{"expr": expression, "rule": "original expression"}]
     expr = _parse(expression)
+    steps: list[dict] = [{"expr": _fmt(expr), "rule": "original expression"}]
 
     # Collect like terms: sympy may already have done this on parse
     parsed_str = _fmt(expr)
@@ -156,18 +156,16 @@ def _op_simplify(expression: str, _variable: str | None) -> tuple[list[dict], st
 
 
 def _op_solve(expression: str, variable: str | None) -> tuple[list[dict], str]:
-    steps: list[dict] = [{"expr": expression, "rule": "original equation"}]
-
     if "=" in expression:
         lhs_str, rhs_str = expression.split("=", 1)
         lhs = _parse(lhs_str.strip())
         rhs = _parse(rhs_str.strip())
         eq_expr = lhs - rhs
-        rearranged = f"{_fmt(eq_expr)} = 0"
-        steps.append({"expr": rearranged, "rule": "rearrange: move all terms to one side"})
+        steps: list[dict] = [{"expr": f"{_fmt(lhs)} = {_fmt(rhs)}", "rule": "original equation"}]
+        steps.append({"expr": f"{_fmt(eq_expr)} = 0", "rule": "rearrange: move all terms to one side"})
     else:
         eq_expr = _parse(expression)
-        steps[0]["rule"] = "expression set equal to zero"
+        steps: list[dict] = [{"expr": _fmt(eq_expr), "rule": "expression set equal to zero"}]
 
     var = _pick_var(eq_expr, variable)
     if not eq_expr.free_symbols:
@@ -198,14 +196,14 @@ def _op_diff(expression: str, variable: str | None) -> tuple[list[dict], str]:
     if not expr.free_symbols:
         return (
             [
-                {"expr": expression, "rule": "original expression"},
+                {"expr": _fmt(expr), "rule": "original expression"},
                 {"expr": "0", "rule": "derivative of a constant = 0"},
             ],
             "0",
         )
 
     steps: list[dict] = [
-        {"expr": expression, "rule": f"differentiate with respect to {var}"}
+        {"expr": _fmt(expr), "rule": f"differentiate with respect to {var}"}
     ]
 
     result = diff(expr, var)
@@ -237,7 +235,7 @@ def _op_integrate(expression: str, variable: str | None) -> tuple[list[dict], st
 
     var = _pick_var(expr, variable)
     steps: list[dict] = [
-        {"expr": expression, "rule": f"integrate with respect to {var}"}
+        {"expr": _fmt(expr), "rule": f"integrate with respect to {var}"}
     ]
 
     result = integrate(expr, var)

@@ -296,13 +296,14 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
 
     messages = _build_messages(session, persona_ctx)
     last_backend_tool_result: dict | None = None
+    last_tool_name: str | None = None  # tracks last executed tool for dedup
 
-    for _ in range(_MAX_TOOL_ITERATIONS):
+    for iteration in range(_MAX_TOOL_ITERATIONS):
         raw, usage = await llm.call_tutor(messages)
         session.metrics.token_usage.add(usage)
         _log.info(
-            "tokens turn=%d session=%s prompt=%d completion=%d | session_total=%d",
-            session.metrics.turns_total,
+            "tokens iter=%d session=%s prompt=%d completion=%d | session_total=%d",
+            iteration,
             session.session_id[:8],
             usage["prompt_tokens"],
             usage["completion_tokens"],
@@ -326,6 +327,17 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
                 status_code=502, detail="Agent emitted tool_call without 'name'"
             )
 
+        # Guard: if the model calls the same tool again after already receiving
+        # its result, return early rather than executing and looping.
+        if tool_name == last_tool_name and last_backend_tool_result is not None:
+            _log.warning(
+                "session=%s tool=%r called again after result already returned — "
+                "breaking loop and returning existing result",
+                session.session_id[:8],
+                tool_name,
+            )
+            return parsed, None, last_backend_tool_result
+
         try:
             dispatch = plugin_registry.dispatch_tool(
                 session.domain, tool_name, tool_args, session
@@ -337,17 +349,24 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
             session.pending_frontend_tool = dispatch
             return parsed, dispatch, last_backend_tool_result
 
-        # Backend tool: feed result back to the agent and loop.
+        # Always record the assistant turn that issued the call so the next
+        # LLM iteration sees a coherent [user → assistant → system] thread.
+        # Skipping this when reply is empty was the original bug: the model
+        # saw a tool result with no prior assistant message and re-issued the
+        # same call every iteration.
+        assistant_msg = {"role": "assistant", "content": parsed.reply or ""}
+        messages.append(assistant_msg)
+        session.message_history.append(assistant_msg)
+
+        last_tool_name = tool_name
         last_backend_tool_result = dispatch
         tool_msg = {
-            "role": "system",
+            "role": "user",
             "content": (
-                f"TOOL RESULT — '{tool_name}' executed successfully.\n"
-                f"Result: {dispatch.get('result')!r}\n"
-                f"The result is now displayed to the student in the side panel.\n"
-                f"IMPORTANT: set tool_call to null in your next control block. "
-                f"Do NOT call another tool. Reply to the student and ask them to "
-                f"interpret what they see — do not state the conclusion yourself."
+                f"[SYSTEM] Tool '{tool_name}' result: {dispatch.get('result')!r}. "
+                f"The output is shown to the student. "
+                f"Reply to the student now. Do not call any tool. "
+                f"Set tool_call to null."
             ),
         }
         messages.append(tool_msg)

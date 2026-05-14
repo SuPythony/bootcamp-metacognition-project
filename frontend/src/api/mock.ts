@@ -71,8 +71,12 @@ const SCRIPTED_TURNS: ChatResponse[] = [
         component: "RuleRecallPrompt",
         domain: "math",
         props: {
-          candidate_rules: ["distributive", "inverse operations", "commutative"],
-          context_expr: "2x + 3 = 7",
+          candidate_rules: [
+            "inverse operations",
+            "$a(b+c) = ab+ac$ (distributive)",
+            "$a + b = b + a$ (commutative)",
+          ],
+          context_expr: "$2x + 3 = 7$",
         },
         placement: "inline",
         lifetime: "until_next_turn",

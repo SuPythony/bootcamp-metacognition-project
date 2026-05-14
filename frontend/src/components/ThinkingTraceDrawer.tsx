@@ -1,4 +1,5 @@
 import type { ThinkingTrace } from "../api/types";
+import MathText from "./MathText";
 
 const DELTA_STYLES: Record<ThinkingTrace["understanding_delta_label"], string> = {
   significant: "text-green-700 bg-green-50 border-green-200",
@@ -38,7 +39,7 @@ export default function ThinkingTraceDrawer({ trace }: { trace: ThinkingTrace })
               You started with
             </p>
             <p className="text-sm text-indigo-800 italic">
-              "{trace.initial_understanding}"
+              "<MathText inline>{trace.initial_understanding}</MathText>"
             </p>
           </div>
         )}
@@ -49,14 +50,14 @@ export default function ThinkingTraceDrawer({ trace }: { trace: ThinkingTrace })
               By the end
             </p>
             <p className="text-sm text-indigo-800 italic">
-              "{trace.final_understanding}"
+              "<MathText inline>{trace.final_understanding}</MathText>"
             </p>
           </div>
         )}
 
         {trace.understanding_delta_evidence && (
           <p className="text-xs text-indigo-600">
-            {trace.understanding_delta_evidence}
+            <MathText inline>{trace.understanding_delta_evidence}</MathText>
           </p>
         )}
       </section>
@@ -98,7 +99,7 @@ export default function ThinkingTraceDrawer({ trace }: { trace: ThinkingTrace })
                     {sp.id}
                   </span>
                   <p className="text-gray-700 text-sm mt-0.5 leading-snug">
-                    {sp.description}
+                    <MathText inline>{sp.description}</MathText>
                   </p>
                   {sp.escape_hatch_reflection && (
                     <p className="text-xs text-amber-600 mt-1 italic">

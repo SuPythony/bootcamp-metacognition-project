@@ -1,5 +1,6 @@
 import type { Subproblem } from "../api/types";
 import HintBadge from "./HintBadge";
+import MathText from "./MathText";
 
 const STATUS_STYLES: Record<Subproblem["status"], string> = {
   pending: "bg-gray-50 border-gray-200 text-gray-500",
@@ -43,9 +44,13 @@ export default function SubproblemPanel({
                 <span className="text-xs">{STATUS_LABEL[sp.status]}</span>
               </div>
             </div>
-            <p className="text-sm leading-snug">{sp.description}</p>
+            <p className="text-sm leading-snug">
+              <MathText inline>{sp.description}</MathText>
+            </p>
             {sp.goal && (
-              <p className="text-xs mt-1.5 opacity-70 italic">→ {sp.goal}</p>
+              <p className="text-xs mt-1.5 opacity-70 italic">
+                → <MathText inline>{sp.goal}</MathText>
+              </p>
             )}
           </div>
         ))}

@@ -140,33 +140,29 @@ export default function SessionView({
         onDirectiveResponse={handleDirectiveResponse}
       />
 
-      {/* Modal overlay for confidence checks, escape-hatch gate, etc. */}
-      {modalDirective && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full space-y-4">
-            {(() => {
-              const Component = lookup(
-                `${modalDirective.domain}.${modalDirective.component}`
-              );
-              if (!Component) return null;
-              return (
-                <Component
-                  {...modalDirective.props}
-                  onSelect={(value: unknown) =>
-                    handleDirectiveResponse(modalDirective.component, value)
-                  }
-                />
-              );
-            })()}
-            <button
-              onClick={() => setModalDirective(null)}
-              className="w-full text-xs text-gray-400 hover:text-gray-600 transition-colors"
-            >
-              Dismiss
-            </button>
+      {/* Modal overlay — only mount if the component is registered */}
+      {modalDirective && (() => {
+        const Component = lookup(`${modalDirective.domain}.${modalDirective.component}`);
+        if (!Component) return null;
+        return (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full space-y-4">
+              <Component
+                {...modalDirective.props}
+                onSelect={(value: unknown) =>
+                  handleDirectiveResponse(modalDirective.component, value)
+                }
+              />
+              <button
+                onClick={() => setModalDirective(null)}
+                className="w-full text-xs text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

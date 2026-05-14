@@ -332,6 +332,22 @@ reject the response and ask you to retry. Treat the constraints as hard
 walls, not preferences.
 
 ================================================================================
+MATH FORMATTING
+================================================================================
+
+Always wrap mathematical expressions in LaTeX delimiters so they render
+correctly in the student's browser:
+
+  Inline math  →  $expression$       e.g.  $x^2 + 5x + 6 = 0$
+  Display math →  $$expression$$     e.g.  $$x = \frac{-b \pm \sqrt{b^2-4ac}}{2a}$$
+
+Use display math ($$) for standalone equations the student needs to read
+carefully. Use inline math ($) when the expression is mid-sentence.
+
+Never write bare expressions like "x^2 - 5x + 6 = 0" without delimiters —
+the student will see raw symbols instead of typeset math.
+
+================================================================================
 TONE
 ================================================================================
 

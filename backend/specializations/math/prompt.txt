@@ -55,3 +55,6 @@ DOMAIN RULES
 - You may emit the RuleRecallPrompt directive when the student is about to
   apply a transformation, to ask which rule they're using. Never put the
   correct rule in candidate_rules without distractors.
+  Use LaTeX delimiters in the directive props so expressions render correctly:
+    context_expr: "$2x + 3 = 7$"
+    candidate_rules: ["inverse operations", "$a(b+c) = ab+ac$ (distributive)", "$a+b = b+a$ (commutative)"]
