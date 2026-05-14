@@ -1,4 +1,7 @@
 import { useState, useRef, useEffect } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import type { UIDirective, Domain } from "../api/types";
 import { lookup } from "../specializations/registry";
 
@@ -45,13 +48,35 @@ export default function ChatPane({
               className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
               <div
-                className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap leading-relaxed ${
+                className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                   msg.role === "user"
                     ? "bg-indigo-600 text-white rounded-br-sm"
                     : "bg-gray-100 text-gray-900 rounded-bl-sm"
                 }`}
               >
-                {msg.content}
+                {msg.role === "user" ? (
+                  <span className="whitespace-pre-wrap">{msg.content}</span>
+                ) : (
+                  <ReactMarkdown
+                    remarkPlugins={[remarkMath]}
+                    rehypePlugins={[rehypeKatex]}
+                    components={{
+                      p: ({ children }) => <p className="mb-1 last:mb-0">{children}</p>,
+                      code: ({ children }) => (
+                        <code className="bg-gray-200 text-gray-800 rounded px-1 py-0.5 text-xs font-mono">
+                          {children}
+                        </code>
+                      ),
+                      pre: ({ children }) => (
+                        <pre className="bg-gray-200 text-gray-800 rounded p-2 text-xs font-mono overflow-x-auto my-1">
+                          {children}
+                        </pre>
+                      ),
+                    }}
+                  >
+                    {msg.content}
+                  </ReactMarkdown>
+                )}
               </div>
             </div>
 
