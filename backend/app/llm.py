@@ -104,15 +104,26 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+def _extract_usage(response: dict) -> dict:
+    """Pull token usage out of an OpenRouter response. Returns zeros if absent."""
+    u = response.get("usage") or {}
+    return {
+        "prompt_tokens": int(u.get("prompt_tokens", 0)),
+        "completion_tokens": int(u.get("completion_tokens", 0)),
+        "total_tokens": int(u.get("total_tokens", 0)),
+    }
+
+
 async def call_tutor(
     messages: list[dict],
     schema: dict | None = None,
-) -> dict:
-    """Single tutor turn. Returns the parsed structured-output dict.
+) -> tuple[dict, dict]:
+    """Single tutor turn. Returns (parsed_output, token_usage).
 
     If `schema` is provided, requests JSON-Schema mode from OpenRouter and
     parses the response as JSON. On parse failure, retries once with an
     additional system message instructing the model to repair its output.
+    token_usage shape: { prompt_tokens, completion_tokens, total_tokens }.
     """
     model = _env("LLM_MODEL_TUTOR")
     response_format = (
@@ -124,9 +135,10 @@ async def call_tutor(
     response = await _post_chat(
         model=model, messages=messages, response_format=response_format
     )
+    usage = _extract_usage(response)
     content = _strip_fences(_extract_content(response))
     try:
-        return json.loads(content)
+        return json.loads(content), usage
     except json.JSONDecodeError:
         pass
 
@@ -148,21 +160,27 @@ async def call_tutor(
     response = await _post_chat(
         model=model, messages=retry_messages, response_format=response_format
     )
+    retry_usage = _extract_usage(response)
+    # Accumulate both calls' tokens for the retry case.
+    combined_usage = {
+        k: usage[k] + retry_usage[k] for k in usage
+    }
     content = _strip_fences(_extract_content(response))
     try:
-        return json.loads(content)
+        return json.loads(content), combined_usage
     except json.JSONDecodeError as e:
         raise LLMParseError(
             f"Tutor output did not parse as JSON after one retry: {content[:300]!r}"
         ) from e
 
 
-async def call_classifier(query: str) -> dict:
-    """Domain classifier. Returns { "domain": str, "complexity_hint": str }.
+async def call_classifier(query: str) -> tuple[dict, dict]:
+    """Domain classifier. Returns ({ "domain": str, "complexity_hint": str }, token_usage).
 
     The returned `domain` must be one of the user-facing domains registered in
     the plugin registry (i.e. not an internal domain). Validation is the
     caller's responsibility — this function just parses the model output.
+    token_usage shape: { prompt_tokens, completion_tokens, total_tokens }.
     """
     model = _env("LLM_MODEL_CLASSIFIER")
     # Build a tight system prompt that constrains output to JSON.
@@ -191,6 +209,7 @@ async def call_classifier(query: str) -> dict:
     response = await _post_chat(
         model=model, messages=messages, response_format=response_format
     )
+    usage = _extract_usage(response)
     content = _strip_fences(_extract_content(response))
     try:
         parsed = json.loads(content)
@@ -199,13 +218,17 @@ async def call_classifier(query: str) -> dict:
             f"Classifier output did not parse as JSON: {content[:200]!r}"
         ) from e
 
+    # Some models return a bare JSON string ("math") instead of an object.
+    if isinstance(parsed, str):
+        parsed = {"domain": parsed}
+
     if parsed.get("domain") not in domains:
         raise LLMClassifierError(
             f"Classifier returned domain {parsed.get('domain')!r}, "
             f"which is not in {domains!r}"
         )
     parsed.setdefault("complexity_hint", "multi-step")
-    return parsed
+    return parsed, usage
 
 
 async def stream_tutor(

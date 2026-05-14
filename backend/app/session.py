@@ -148,6 +148,17 @@ class Persona(BaseModel):
         return " ".join(bits) if bits else "No persona on file yet."
 
 
+class TokenUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def add(self, usage: dict) -> None:
+        self.prompt_tokens += usage.get("prompt_tokens", 0)
+        self.completion_tokens += usage.get("completion_tokens", 0)
+        self.total_tokens += usage.get("total_tokens", 0)
+
+
 class Metrics(BaseModel):
     turns_total: int = 0
     clarification_turns: int = 0
@@ -156,6 +167,7 @@ class Metrics(BaseModel):
     direct_answer_requests: int = 0
     self_corrections: int = 0
     phase_timestamps: dict[str, str] = Field(default_factory=dict)
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
 class Session(BaseModel):

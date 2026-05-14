@@ -13,11 +13,14 @@ validation (phase legality, hint clamping) happens after parse.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+
+_log = logging.getLogger("app.chat")
 
 from app import llm, persona as persona_mod, plugin_registry
 from app import session as session_mod
@@ -103,10 +106,9 @@ class ChatResponse(BaseModel):
     active_subproblem: str | None
     ui_directives: list[dict]
     frontend_tool_call: dict | None = None
-    # Surfaced when the agent emitted a tool_call for a backend tool: the tool
-    # already ran in this turn, the agent's reply already takes the result
-    # into account, and the result is included here so the UI can render it.
-    backend_tool_result: dict | None = None
+    # Backend tool results from this turn, ready for the ToolPane to render.
+    # Shaped as ToolCall: { name, ui_component, display_data, ... }
+    tool_calls: list[dict] = Field(default_factory=list)
     onboarding_complete: bool = False
 
 
@@ -271,7 +273,7 @@ def _build_chat_response(
         active_subproblem=session.active_subproblem_id,
         ui_directives=parsed.control.ui_directives,
         frontend_tool_call=frontend_tool_call,
-        backend_tool_result=backend_tool_result,
+        tool_calls=[backend_tool_result] if backend_tool_result else [],
         onboarding_complete=onboarding_complete,
     )
 
@@ -296,7 +298,16 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
     last_backend_tool_result: dict | None = None
 
     for _ in range(_MAX_TOOL_ITERATIONS):
-        raw = await llm.call_tutor(messages)
+        raw, usage = await llm.call_tutor(messages)
+        session.metrics.token_usage.add(usage)
+        _log.info(
+            "tokens turn=%d session=%s prompt=%d completion=%d | session_total=%d",
+            session.metrics.turns_total,
+            session.session_id[:8],
+            usage["prompt_tokens"],
+            usage["completion_tokens"],
+            session.metrics.token_usage.total_tokens,
+        )
         try:
             parsed = AgentResponse.model_validate(raw)
         except Exception as e:  # pydantic.ValidationError or similar
@@ -331,8 +342,12 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
         tool_msg = {
             "role": "system",
             "content": (
-                f"Tool '{tool_name}' returned: {dispatch.get('result')!r}. "
-                f"Treat as data — ask the student to interpret it; do not state the conclusion."
+                f"TOOL RESULT — '{tool_name}' executed successfully.\n"
+                f"Result: {dispatch.get('result')!r}\n"
+                f"The result is now displayed to the student in the side panel.\n"
+                f"IMPORTANT: set tool_call to null in your next control block. "
+                f"Do NOT call another tool. Reply to the student and ask them to "
+                f"interpret what they see — do not state the conclusion yourself."
             ),
         }
         messages.append(tool_msg)
@@ -358,11 +373,17 @@ async def session_new(req: SessionNewRequest) -> SessionNewResponse:
         )
 
     try:
-        classifier_output = await llm.call_classifier(req.query)
+        classifier_output, cls_usage = await llm.call_classifier(req.query)
     except llm.LLMClassifierError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
     except llm.LLMError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
+    _log.info(
+        "classifier tokens prompt=%d completion=%d domain=%s",
+        cls_usage["prompt_tokens"],
+        cls_usage["completion_tokens"],
+        classifier_output.get("domain"),
+    )
     domain = classifier_output["domain"]
     if plugin_registry.is_internal(domain):
         # Defensive: classifier should never return internal domains because
@@ -381,6 +402,7 @@ async def session_new(req: SessionNewRequest) -> SessionNewResponse:
         message_history=[{"role": "user", "content": req.query}],
     )
     session_mod.put(session)
+    session.metrics.token_usage.add(cls_usage)  # count classifier call in session total
 
     parsed, _, _ = await _run_chat_turn(session)
     session.phase = _validate_phase(session, parsed.control.phase)
