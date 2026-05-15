@@ -14,6 +14,7 @@ validation (phase legality, hint clamping) happens after parse.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from typing import Any, Literal
 
@@ -24,6 +25,7 @@ _log = logging.getLogger("app.chat")
 
 from app import llm, persona as persona_mod, plugin_registry
 from app import session as session_mod
+from app.prompts.variants import load_combined, parse_domain_variants
 from app.session import (
     CalibrationPoint,
     Mode,
@@ -35,6 +37,22 @@ from app.session import (
 )
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Startup-time configuration — read once, applies to ALL sessions this run.
+# ---------------------------------------------------------------------------
+
+# LLM temperatures. Defaults: 0.7 for tutor (creative), 0.0 for classifier (deterministic).
+_TUTOR_TEMP: float = float(os.environ.get("TUTOR_TEMPERATURE", "0.7"))
+_CLASSIFIER_TEMP: float = float(os.environ.get("CLASSIFIER_TEMPERATURE", "0.0"))
+
+# Prompt variant selection. All sessions in this server process use the same variant.
+# PROMPT_VARIANT_BASE: single key e.g. "base:v2"
+# PROMPT_VARIANT_DOMAIN: comma-separated "<domain>:<version>" pairs e.g. "math:v2,essay:v1"
+_VARIANT_BASE: str | None = os.environ.get("PROMPT_VARIANT_BASE")
+_VARIANT_DOMAIN_MAP: dict[str, str] = parse_domain_variants(
+    os.environ.get("PROMPT_VARIANT_DOMAIN", "")
+)
 
 
 # ---- Request / response models ----------------------------------------------
@@ -123,7 +141,11 @@ _MAX_TOOL_ITERATIONS = 3
 
 def _build_messages(session: Session, persona_ctx: str) -> list[dict]:
     """Build the OpenAI-style message list for an LLM call."""
-    domain_prompt = plugin_registry.get_prompt(session.domain)
+    domain_prompt = load_combined(
+        session.domain,
+        base_variant=_VARIANT_BASE,
+        domain_variant=_VARIANT_DOMAIN_MAP.get(session.domain),
+    )
     return [
         {"role": "system", "content": domain_prompt},
         {"role": "system", "content": f"Student profile:\n{persona_ctx}"},
@@ -330,7 +352,7 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
     last_tool_name: str | None = None  # tracks last executed tool for dedup
 
     for iteration in range(_MAX_TOOL_ITERATIONS):
-        raw, usage = await llm.call_tutor(messages)
+        raw, usage = await llm.call_tutor(messages, session_id=session.session_id, temperature=_TUTOR_TEMP)
         session.metrics.token_usage.add(usage)
         _log.info(
             "tokens iter=%d session=%s prompt=%d completion=%d | session_total=%d",
@@ -342,7 +364,9 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
         )
         try:
             parsed = AgentResponse.model_validate(raw)
+            llm.mark_parse_result(session.session_id, True)
         except Exception as e:  # pydantic.ValidationError or similar
+            llm.mark_parse_result(session.session_id, False, str(e))
             raise HTTPException(
                 status_code=502,
                 detail=f"Agent output failed schema validation: {e}",
@@ -423,7 +447,7 @@ async def session_new(req: SessionNewRequest) -> SessionNewResponse:
         )
 
     try:
-        classifier_output, cls_usage = await llm.call_classifier(req.query)
+        classifier_output, cls_usage = await llm.call_classifier(req.query, temperature=_CLASSIFIER_TEMP)
     except llm.LLMClassifierError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
     except llm.LLMError as e:

@@ -24,4 +24,8 @@ Thumbs.db
 backend/personas/*
 !backend/personas/.gitkeep
 
+# LLM call logs (runtime, not committed)
+backend/logs/*
+!backend/logs/.gitkeep
+
 .claude/

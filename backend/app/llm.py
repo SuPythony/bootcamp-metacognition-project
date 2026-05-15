@@ -12,13 +12,83 @@ before frontend wiring begins.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
+import logging
 import os
 import re
+import sys
+import time
+import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+
+# ---------------------------------------------------------------------------
+# JSONL call logger
+# ---------------------------------------------------------------------------
+
+def _setup_logger() -> logging.Logger:
+    logger = logging.getLogger("llm.calls")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    fmt = logging.Formatter("%(message)s")
+
+    # Ensure the logs directory exists.
+    logs_dir = Path(__file__).resolve().parent.parent / "logs"
+    logs_dir.mkdir(exist_ok=True)
+
+    fh = logging.FileHandler(logs_dir / "llm.jsonl", encoding="utf-8")
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
+
+    return logger
+
+
+def _logging_enabled() -> bool:
+    """Return False when LOG_LLM_CALLS is set to a falsy value (false/0/no)."""
+    return os.environ.get("LOG_LLM_CALLS", "true").lower() not in ("false", "0", "no")
+
+
+def _write_log(entry: dict) -> None:
+    if not _logging_enabled():
+        return
+    try:
+        _setup_logger().debug(json.dumps(entry))
+    except Exception:
+        pass  # never let logging crash the caller
+
+
+def mark_parse_result(session_id: str, success: bool, error: str | None = None) -> None:
+    """Write a follow-up JSONL event recording the Pydantic parse outcome.
+
+    Called by chat.py after AgentResponse.model_validate(). Fire-and-forget —
+    never raises.
+    """
+    if not _logging_enabled():
+        return
+    entry: dict = {
+        "event": "llm_parse_result",
+        "ts":  datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "session_id": session_id,
+        "parse_success": success,
+    }
+    if error is not None:
+        entry["parse_error"] = error
+    _write_log(entry)
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
 
 class LLMError(RuntimeError):
     """Base for any LLM failure: HTTP, parse, validation."""
@@ -52,6 +122,7 @@ async def _post_chat(
     model: str,
     messages: list[dict],
     response_format: dict | None = None,
+    temperature: float | None = None,
     timeout: float = 60.0,
     _max_retries: int = 4,
 ) -> dict:
@@ -61,6 +132,8 @@ async def _post_chat(
     payload: dict[str, Any] = {"model": model, "messages": messages, "max_tokens": max_tokens}
     if response_format is not None:
         payload["response_format"] = response_format
+    if temperature is not None:
+        payload["temperature"] = temperature
     headers = {
         "Authorization": f"Bearer {_api_key()}",
         "Content-Type": "application/json",
@@ -117,6 +190,8 @@ def _extract_usage(response: dict) -> dict:
 async def call_tutor(
     messages: list[dict],
     schema: dict | None = None,
+    session_id: str = "",
+    temperature: float | None = None,
 ) -> tuple[dict, dict]:
     """Single tutor turn. Returns (parsed_output, token_usage).
 
@@ -126,55 +201,116 @@ async def call_tutor(
     token_usage shape: { prompt_tokens, completion_tokens, total_tokens }.
     """
     model = _env("LLM_MODEL_TUTOR")
+    call_id = str(uuid.uuid4())
+    t0 = time.monotonic()
+    raw_content: str = ""
+
     response_format = (
         {"type": "json_schema", "json_schema": {"name": "tutor_turn", "schema": schema, "strict": True}}
         if schema is not None
         else {"type": "json_object"}
     )
 
-    response = await _post_chat(
-        model=model, messages=messages, response_format=response_format
-    )
-    usage = _extract_usage(response)
-    content = _strip_fences(_extract_content(response))
     try:
-        return json.loads(content), usage
-    except json.JSONDecodeError:
-        pass
+        response = await _post_chat(
+            model=model, messages=messages, response_format=response_format,
+            temperature=temperature,
+        )
+        usage = _extract_usage(response)
+        raw_content = _strip_fences(_extract_content(response))
+        try:
+            parsed = json.loads(raw_content)
+        except json.JSONDecodeError:
+            parsed = None
 
-    # Retry once with a corrective system note.
-    retry_messages = messages + [
-        {
-            "role": "assistant",
-            "content": content,
-        },
-        {
-            "role": "system",
-            "content": (
-                "Your previous reply was not valid JSON matching the required "
-                "schema. Reply again with a single JSON object only — no prose, "
-                "no markdown fences, no commentary."
-            ),
-        },
-    ]
-    response = await _post_chat(
-        model=model, messages=retry_messages, response_format=response_format
-    )
-    retry_usage = _extract_usage(response)
-    # Accumulate both calls' tokens for the retry case.
-    combined_usage = {
-        k: usage[k] + retry_usage[k] for k in usage
-    }
-    content = _strip_fences(_extract_content(response))
-    try:
-        return json.loads(content), combined_usage
-    except json.JSONDecodeError as e:
-        raise LLMParseError(
-            f"Tutor output did not parse as JSON after one retry: {content[:300]!r}"
-        ) from e
+        if parsed is not None:
+            _write_log({
+                "event": "llm_call",
+                "ts":  datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "call_id": call_id,
+                "session_id": session_id,
+                "model": model,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+                "input_tokens": usage["prompt_tokens"],
+                "output_tokens": usage["completion_tokens"],
+                "raw_output": raw_content,
+                "parse_success": None,
+            })
+            return parsed, usage
+
+        # Retry once with a corrective system note.
+        retry_messages = messages + [
+            {"role": "assistant", "content": raw_content},
+            {
+                "role": "system",
+                "content": (
+                    "Your previous reply was not valid JSON matching the required "
+                    "schema. Reply again with a single JSON object only — no prose, "
+                    "no markdown fences, no commentary."
+                ),
+            },
+        ]
+        response = await _post_chat(
+            model=model, messages=retry_messages, response_format=response_format,
+            temperature=temperature,
+        )
+        retry_usage = _extract_usage(response)
+        combined_usage = {k: usage[k] + retry_usage[k] for k in usage}
+        raw_content = _strip_fences(_extract_content(response))
+        try:
+            parsed = json.loads(raw_content)
+            _write_log({
+                "event": "llm_call",
+                "ts":  datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "call_id": call_id,
+                "session_id": session_id,
+                "model": model,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+                "input_tokens": combined_usage["prompt_tokens"],
+                "output_tokens": combined_usage["completion_tokens"],
+                "raw_output": raw_content,
+                "parse_success": None,
+            })
+            return parsed, combined_usage
+        except json.JSONDecodeError as e:
+            err = LLMParseError(
+                f"Tutor output did not parse as JSON after one retry: {raw_content[:300]!r}"
+            )
+            _write_log({
+                "event": "llm_error",
+                "ts":  datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "call_id": call_id,
+                "session_id": session_id,
+                "model": model,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+                "input_tokens": combined_usage["prompt_tokens"],
+                "output_tokens": combined_usage["completion_tokens"],
+                "raw_output": raw_content,
+                "parse_success": False,
+                "error": str(err),
+            })
+            raise err from e
+
+    except LLMError:
+        raise
+    except Exception as e:
+        _write_log({
+            "event": "llm_error",
+            "ts":  datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "call_id": call_id,
+            "session_id": session_id,
+            "model": model,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "raw_output": raw_content,
+            "parse_success": False,
+            "error": str(e),
+        })
+        raise
 
 
-async def call_classifier(query: str) -> tuple[dict, dict]:
+async def call_classifier(query: str, temperature: float | None = None) -> tuple[dict, dict]:
     """Domain classifier. Returns ({ "domain": str, "complexity_hint": str }, token_usage).
 
     The returned `domain` must be one of the user-facing domains registered in
@@ -207,7 +343,8 @@ async def call_classifier(query: str) -> tuple[dict, dict]:
     ]
     response_format = {"type": "json_object"}
     response = await _post_chat(
-        model=model, messages=messages, response_format=response_format
+        model=model, messages=messages, response_format=response_format,
+        temperature=temperature,
     )
     usage = _extract_usage(response)
     content = _strip_fences(_extract_content(response))
