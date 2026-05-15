@@ -89,6 +89,10 @@ def _run_assertions(raw_output: str, probe: dict) -> None:
 
     `raw_output` is the raw string the LLM returned (or re-serialised JSON).
     Raises AssertionError on the first violation.
+
+    New schema: three top-level keys — `thinking` (optional scratchpad),
+    `reply` (student-visible, may be null when tool_call is set), `control`
+    (always present), `signal` (optional, absent on quiet turns).
     """
     # 1. JSON validity check.
     parsed: dict | None = None
@@ -102,14 +106,27 @@ def _run_assertions(raw_output: str, probe: dict) -> None:
             raise AssertionError(
                 f"Reply is not valid JSON:\n{raw_output[:300]!r}"
             )
-        if not isinstance(parsed, dict) or "reply" not in parsed or "control" not in parsed:
+        # `reply` may be null (tool_call turns); `control` is always required.
+        if not isinstance(parsed, dict) or "control" not in parsed:
             raise AssertionError(
-                f"Reply JSON missing 'reply' or 'control' keys:\n{raw_output[:300]!r}"
+                f"Reply JSON missing 'control' key:\n{raw_output[:300]!r}"
             )
+
+    # Assert `thinking` content does not leak into `reply`.
+    if parsed is not None and isinstance(parsed, dict):
+        thinking = parsed.get("thinking") or ""
+        reply_text = parsed.get("reply") or ""
+        if thinking and len(thinking) > 20:
+            # Only check for substantial thinking blocks (not empty / trivial).
+            # A direct copy would be a clear bug.
+            if thinking.strip() == reply_text.strip():
+                raise AssertionError(
+                    "thinking field is identical to reply — scratchpad leaked to student"
+                )
 
     # Extract the text the student actually sees for remaining checks.
     if parsed is not None and isinstance(parsed, dict):
-        reply = parsed.get("reply", raw_output)
+        reply = parsed.get("reply") or raw_output
     else:
         reply = raw_output
 
@@ -134,6 +151,23 @@ def _run_assertions(raw_output: str, probe: dict) -> None:
     # 5. Core Socratic rules — always applied.
     _assert_one_question_per_turn(reply)
     _assert_no_solution_leak(reply)
+
+    # 6. signal block must be absent or a valid dict (not an error).
+    if probe.get("assert_signal_absent_or_valid") and parsed is not None:
+        sig = parsed.get("signal")
+        if sig is not None and not isinstance(sig, dict):
+            raise AssertionError(
+                f"signal field is present but not a dict: {sig!r}"
+            )
+
+    # 7. thinking must not appear verbatim in reply.
+    if probe.get("assert_thinking_not_in_reply") and parsed is not None:
+        thinking = (parsed.get("thinking") or "").strip()
+        reply_stripped = reply.strip()
+        if thinking and thinking == reply_stripped:
+            raise AssertionError(
+                "thinking field is identical to reply — scratchpad leaked to student"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +424,63 @@ PROBES: list[dict] = [
         "assert_no_enumeration": True,
         "manual_checks": [
             "Does the reply ask about argument or claim rather than sentence structure?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 8. signal_absent_is_valid
+    # A quiet clarification turn where no signal events occur.
+    # Model should produce no `signal` block; backend should not error.
+    # ------------------------------------------------------------------
+    {
+        "id": "signal_absent_is_valid",
+        "domain": "math",
+        "description": "A quiet turn should produce no signal block; parser must not error on its absence.",
+        "messages": [
+            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
+            {"role": "user", "content": "I need help solving 2x + 3 = 7"},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "Before we dig in — what's your current thinking on this equation?",
+                    "control": {"phase": "clarification"},
+                }),
+            },
+            {"role": "user", "content": "I think I need to move the 3 to the other side."},
+        ],
+        "assert_not_in_reply": [],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": False,
+        "assert_signal_absent_or_valid": True,
+        "manual_checks": [
+            "Is the signal block absent (or present with only relevant fields)?",
+            "Does the reply stay Socratic without unnecessary event emissions?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 9. thinking_not_in_reply
+    # Model emits a thinking scratchpad — it must not appear in reply.
+    # ------------------------------------------------------------------
+    {
+        "id": "thinking_not_in_reply",
+        "domain": "math",
+        "description": "thinking scratchpad content must not appear verbatim in the reply field.",
+        "messages": [
+            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
+            {"role": "user", "content": "I need help solving 2x + 3 = 7"},
+        ],
+        "assert_not_in_reply": [],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": False,
+        "assert_thinking_not_in_reply": True,
+        "manual_checks": [
+            "Does the thinking field contain reasoning the student should not see?",
+            "Is the reply distinct from the thinking content?",
         ],
     },
 ]

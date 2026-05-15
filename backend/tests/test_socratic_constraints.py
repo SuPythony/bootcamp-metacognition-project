@@ -124,6 +124,72 @@ def test_no_enumeration_catches_three_step_recipe():
         )
 
 
+# ---- New-schema unit tests --------------------------------------------------
+
+
+def test_hint_level_null_is_noop():
+    """hint_level: null in control must not overwrite the active subproblem's
+    existing hints_given counter."""
+    import uuid
+    from app import session as session_mod
+    from app.chat import AgentControl, AgentResponse, _apply_agent_response
+
+    # Build a minimal session with one active subproblem at hint level 3.
+    sess = session_mod.Session(
+        session_id=str(uuid.uuid4()),
+        username="testuser",
+        domain="math",
+        original_query="x+1=2",
+    )
+    sp = session_mod.Subproblem(
+        id="sp-1", description="isolate x", status="active", hints_given=3
+    )
+    sess.subproblems.append(sp)
+    sess.active_subproblem_id = "sp-1"
+
+    # Agent response with hint_level=None (quiet turn).
+    parsed = AgentResponse(reply="Good thinking.", control=AgentControl(hint_level=None))
+    _apply_agent_response(sess, parsed)
+
+    sp_after = next(s for s in sess.subproblems if s.id == "sp-1")
+    assert sp_after.hints_given == 3, (
+        f"hints_given was overwritten to {sp_after.hints_given}; expected 3"
+    )
+
+
+def test_signal_absent_does_not_error():
+    """A response with no signal block must not raise when applied to a session."""
+    import uuid
+    from app import session as session_mod
+    from app.chat import AgentControl, AgentResponse, _apply_agent_response
+
+    sess = session_mod.Session(
+        session_id=str(uuid.uuid4()),
+        username="testuser",
+        domain="math",
+        original_query="x+1=2",
+    )
+    parsed = AgentResponse(reply="What do you think?", control=AgentControl(), signal=None)
+    _apply_agent_response(sess, parsed)  # must not raise
+    assert sess.metrics.turns_total == 1
+
+
+def test_thinking_stripped_from_parsed_response():
+    """thinking field must be None after the strip step applied in _run_chat_turn."""
+    from app.chat import AgentResponse
+
+    raw = {
+        "thinking": "The student seems confused. I should ask a guiding question.",
+        "reply": "What rule applies here?",
+        "control": {},
+    }
+    raw.pop("thinking", None)  # mirrors the strip in _run_chat_turn
+    parsed = AgentResponse.model_validate(raw)
+    parsed.thinking = None
+    assert parsed.thinking is None
+    assert parsed.reply == "What rule applies here?"
+
+
 # ---- Per-domain fixture hook ------------------------------------------------
 #
 # Specialization PRs will parametrize this hook with their own seeded

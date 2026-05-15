@@ -15,10 +15,28 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-def _agent_reply(reply: str, **control_overrides) -> str:
-    """Build a single JSON-encoded agent response. Convenience for queueing
-    responses into fake_openrouter."""
-    return json.dumps({"reply": reply, "control": control_overrides})
+_SIGNAL_FIELDS = frozenset({
+    "subproblem_updates", "emit_reflection", "last_reflection_quality",
+    "emit_calibration_check", "calibration_outcome", "persona_updates",
+    "self_correction_noted", "escape_hatch_triggered", "escape_hatch_reflection",
+    "verification_prompted", "concepts_established", "student_question_quality",
+    "decomposition_source", "disengagement_noted", "refined_query",
+})
+
+
+def _agent_reply(reply: str | None = None, **overrides) -> str:
+    """Build a single JSON-encoded agent response.
+
+    Keyword args matching _SIGNAL_FIELDS are routed to the `signal` block;
+    all others go into `control`. Omits signal entirely when no signal kwargs
+    are provided (matches new schema semantics).
+    """
+    control = {k: v for k, v in overrides.items() if k not in _SIGNAL_FIELDS}
+    signal_data = {k: v for k, v in overrides.items() if k in _SIGNAL_FIELDS}
+    payload: dict = {"reply": reply, "control": control}
+    if signal_data:
+        payload["signal"] = signal_data
+    return json.dumps(payload)
 
 
 def _classifier_reply(domain: str, complexity: str = "single-step") -> str:
@@ -491,15 +509,16 @@ def test_tools_endpoint_404_unknown_tool(client, fake_openrouter):
 
 
 def test_reflection_prompt_auto_injects_directive(client, fake_openrouter):
-    """When agent emits control.reflection_prompt, backend auto-injects a
-    ReflectionPrompt ui_directive so the widget renders even if the LLM didn't
-    format the full directive object."""
+    """When agent emits signal.emit_reflection, backend auto-injects a
+    ReflectionPrompt ui_directive with a question from the backend bank."""
+    from app.chat import REFLECTION_QUESTIONS
+
     fake_openrouter.responses = [
         _classifier_reply("math"),
         _agent_reply("What's your initial read?"),
         _agent_reply(
-            "What felt different about your approach there?",
-            reflection_prompt={"trigger": "periodic", "question": "What felt different?"},
+            "Take a moment.",
+            emit_reflection="periodic",
         ),
     ]
     new = client.post(
@@ -515,18 +534,18 @@ def test_reflection_prompt_auto_injects_directive(client, fake_openrouter):
     assert len(rp) == 1
     assert rp[0]["domain"] == "general"
     assert rp[0]["props"]["trigger"] == "periodic"
-    assert rp[0]["props"]["question"] == "What felt different?"
+    assert rp[0]["props"]["question"] in REFLECTION_QUESTIONS["periodic"]
 
 
 def test_calibration_check_auto_injects_directive(client, fake_openrouter):
-    """When agent emits control.calibration_check string, backend auto-injects
-    a CalibrationCheck ui_directive."""
+    """When agent emits signal.emit_calibration_check=true, backend auto-injects
+    a CalibrationCheck ui_directive with the fixed backend-defined question."""
     fake_openrouter.responses = [
         _classifier_reply("math"),
         _agent_reply("What's your initial read?"),
         _agent_reply(
-            "Before you try — how confident are you?",
-            calibration_check="Before you try sp-2 — how confident are you? 1 to 5.",
+            "Before you try this part.",
+            emit_calibration_check=True,
         ),
     ]
     new = client.post(
@@ -545,14 +564,14 @@ def test_calibration_check_auto_injects_directive(client, fake_openrouter):
 
 
 def test_calibration_check_blocks_wrap_up_on_same_turn(client, fake_openrouter):
-    """If agent emits both calibration_check and phase='wrap_up', the phase
+    """If agent emits both emit_calibration_check and phase='wrap_up', the phase
     transition is blocked so the student can answer before the session closes."""
     fake_openrouter.responses = [
         _classifier_reply("math"),
         _agent_reply("What's your initial read?"),
         _agent_reply(
             "Before you finish — how confident were you?",
-            calibration_check="How confident? 1 to 5.",
+            emit_calibration_check=True,
             phase="wrap_up",  # backend should block this
         ),
     ]
@@ -573,19 +592,19 @@ def test_calibration_check_blocks_wrap_up_on_same_turn(client, fake_openrouter):
 
 
 def test_no_double_inject_when_agent_already_emits_directive(client, fake_openrouter):
-    """If agent already emits a ReflectionPrompt in ui_directives AND sets
-    control.reflection_prompt, backend deduplicates — only one directive."""
+    """If agent emits signal.emit_reflection AND also manually includes a
+    ReflectionPrompt in ui_directives, backend deduplicates — only one directive."""
     fake_openrouter.responses = [
         _classifier_reply("math"),
         _agent_reply("What's your initial read?"),
         _agent_reply(
             "Reflect on that.",
-            reflection_prompt={"trigger": "periodic", "question": "What changed?"},
+            emit_reflection="periodic",
             # Agent also manually emits the directive (redundant but possible).
             ui_directives=[{
                 "component": "ReflectionPrompt",
                 "domain": "general",
-                "props": {"question": "What changed?", "trigger": "periodic"},
+                "props": {"question": "Already there.", "trigger": "periodic"},
                 "placement": "inline",
                 "lifetime": "until_next_turn",
             }],
@@ -601,3 +620,285 @@ def test_no_double_inject_when_agent_already_emits_directive(client, fake_openro
     assert resp.status_code == 200
     rp = [d for d in resp.json()["ui_directives"] if d["component"] == "ReflectionPrompt"]
     assert len(rp) == 1, "Expected exactly one ReflectionPrompt directive, not two"
+
+
+# ---- signal field integration tests -----------------------------------------
+
+
+def test_signal_subproblem_updates_applied(client, fake_openrouter):
+    """signal.subproblem_updates creates subproblems in session state."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your read?"),
+        _agent_reply(
+            "Let's break it down.",
+            phase="decomposition",
+        ),
+        _agent_reply(
+            "Onto the first part.",
+            phase="solving",
+            subproblem_updates=[
+                {"id": "sp-1", "description": "isolate x", "goal": "get x alone", "status": "active"},
+                {"id": "sp-2", "description": "verify", "goal": "check the answer", "status": "pending"},
+            ],
+            active_subproblem="sp-1",
+        ),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "2x+3=7"},
+    ).json()
+    sid = new["session_id"]
+    client.post("/chat", json={"session_id": sid, "message": "two parts"})
+    client.post("/chat", json={"session_id": sid, "message": "looks right"})
+
+    from app import session as session_mod
+    s = session_mod.get(sid)
+    ids = {sp.id for sp in s.subproblems}
+    assert "sp-1" in ids
+    assert "sp-2" in ids
+    sp1 = next(sp for sp in s.subproblems if sp.id == "sp-1")
+    assert sp1.status == "active"
+    assert sp1.description == "isolate x"
+
+
+def test_signal_self_correction_increments_metric(client, fake_openrouter):
+    """signal.self_correction_noted increments session.metrics.self_corrections."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your read?"),
+        _agent_reply(
+            "Nice catch — what made you reconsider?",
+            self_correction_noted=True,
+        ),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    sid = new["session_id"]
+    client.post("/chat", json={"session_id": sid, "message": "wait, I was wrong"})
+
+    from app import session as session_mod
+    s = session_mod.get(sid)
+    assert s.metrics.self_corrections == 1
+
+
+def test_signal_escape_hatch_marks_subproblem(client, fake_openrouter):
+    """signal.escape_hatch_triggered marks the active subproblem and increments metric."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your read?"),
+        _agent_reply(
+            "Let's start.",
+            phase="solving",
+            subproblem_updates=[{"id": "sp-1", "description": "isolate x", "status": "active"}],
+            active_subproblem="sp-1",
+        ),
+        _agent_reply(
+            "Before I show you — in one sentence, where did your thinking get stuck?",
+            escape_hatch_triggered=True,
+        ),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    sid = new["session_id"]
+    client.post("/chat", json={"session_id": sid, "message": "no idea"})
+    client.post("/chat", json={"session_id": sid, "message": "just show me"})
+
+    from app import session as session_mod
+    s = session_mod.get(sid)
+    sp = next((sp for sp in s.subproblems if sp.id == "sp-1"), None)
+    assert sp is not None
+    assert sp.direct_answer_requested is True
+    assert s.metrics.direct_answer_requests == 1
+
+
+def test_signal_new_scalar_fields_tracked(client, fake_openrouter):
+    """verification_prompted, concepts_established, decomposition_source,
+    disengagement_noted, refined_query are all persisted from signal."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your read?"),
+        _agent_reply(
+            "Good, let's proceed.",
+            verification_prompted=True,
+            concepts_established=["inverse operations", "linear equations"],
+            decomposition_source="student",
+            disengagement_noted=False,
+            refined_query="Solve for x: 2x + 3 = 7",
+        ),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "2x+3=7"},
+    ).json()
+    sid = new["session_id"]
+
+    # Give the session an active subproblem first so verification_prompted records.
+    from app import session as session_mod
+    s = session_mod.get(sid)
+    from app.session import Subproblem
+    s.subproblems.append(Subproblem(id="sp-1", description="isolate x", status="active"))
+    s.active_subproblem_id = "sp-1"
+    session_mod.put(s)
+
+    client.post("/chat", json={"session_id": sid, "message": "I verified it"})
+
+    s = session_mod.get(sid)
+    assert "inverse operations" in s.concepts_established
+    assert "linear equations" in s.concepts_established
+    assert s.decomposition_source == "student"
+    assert s.refined_query == "Solve for x: 2x + 3 = 7"
+    assert "sp-1" in s.verification_prompted_subproblems
+
+
+def test_signal_disengagement_counted(client, fake_openrouter):
+    """signal.disengagement_noted increments session.disengagement_count."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your read?"),
+        _agent_reply("Still there?", disengagement_noted=True),
+        _agent_reply("Over to you.", disengagement_noted=True),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    sid = new["session_id"]
+    client.post("/chat", json={"session_id": sid, "message": "k"})
+    client.post("/chat", json={"session_id": sid, "message": "."})
+
+    from app import session as session_mod
+    s = session_mod.get(sid)
+    assert s.disengagement_count == 2
+
+
+def test_signal_reflection_quality_attaches_to_pending(client, fake_openrouter):
+    """signal.last_reflection_quality on the turn after a reflection response
+    attaches the quality rating to the pending reflection entry."""
+    from app.chat import REFLECTION_QUESTIONS
+
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your read?"),
+        _agent_reply("Take a moment.", emit_reflection="periodic"),  # queues reflection
+        _agent_reply("Good.", last_reflection_quality="deep"),       # attaches quality
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    sid = new["session_id"]
+    client.post("/chat", json={"session_id": sid, "message": "Let me think"})
+    client.post(
+        "/chat",
+        json={"session_id": sid, "message": "I noticed I kept assuming x was positive — that's a pattern."},
+    )
+
+    from app import session as session_mod
+    s = session_mod.get(sid)
+    assert len(s.reflection_prompts) == 1
+    rp = s.reflection_prompts[0]
+    assert rp.trigger == "periodic"
+    assert rp.question in REFLECTION_QUESTIONS["periodic"]
+    assert rp.quality == "deep"
+
+
+def test_signal_calibration_outcome_closes_open_point(client, fake_openrouter):
+    """signal.calibration_outcome attaches to the most recent open CalibrationPoint."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your read?"),
+        _agent_reply("Before you try.", emit_calibration_check=True),
+        _agent_reply("Good work.", calibration_outcome="correct"),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    sid = new["session_id"]
+
+    from app import session as session_mod
+    from app.session import CalibrationPoint, Subproblem
+    s = session_mod.get(sid)
+    s.subproblems.append(Subproblem(id="sp-1", description="isolate x", status="active"))
+    s.active_subproblem_id = "sp-1"
+    session_mod.put(s)
+
+    # Turn that emits emit_calibration_check
+    client.post("/chat", json={"session_id": sid, "message": "ready"})
+
+    # Student answers the calibration widget
+    client.post(
+        "/chat",
+        json={
+            "session_id": sid,
+            "directive_response": {"component": "CalibrationCheck", "value": 4},
+        },
+    )
+
+    s = session_mod.get(sid)
+    assert len(s.calibration_points) == 1
+    assert s.calibration_points[0].predicted_confidence == 4
+    assert s.calibration_points[0].outcome == "correct"
+
+
+def test_thinking_trace_includes_signal_derived_fields(client, fake_openrouter):
+    """refined_query, concepts_established, decomposition_source, and
+    disengagement_count all appear in the /thinking-trace response."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your read?"),
+        _agent_reply(
+            "Let's move on.",
+            refined_query="Solve 2x+3=7",
+            concepts_established=["linear equations"],
+            decomposition_source="student",
+            disengagement_noted=True,
+        ),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "2x+3=7"},
+    ).json()
+    sid = new["session_id"]
+    client.post("/chat", json={"session_id": sid, "message": "I understand"})
+
+    resp = client.get(f"/session/{sid}/thinking-trace")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["refined_query"] == "Solve 2x+3=7"
+    assert "linear equations" in body["concepts_established"]
+    assert body["decomposition_source"] == "student"
+    assert body["disengagement_count"] == 1
+
+
+def test_reflection_directive_question_matches_session_record(client, fake_openrouter):
+    """The question shown in the ReflectionPrompt directive must match the
+    question stored in session.reflection_prompts — no double random.choice."""
+    fake_openrouter.responses = [
+        _classifier_reply("math"),
+        _agent_reply("What's your read?"),
+        _agent_reply("Take a moment.", emit_reflection="wrap_up"),
+    ]
+    new = client.post(
+        "/session/new",
+        json={"username": "alice", "mode": "solving", "query": "x+1=2"},
+    ).json()
+    sid = new["session_id"]
+    resp = client.post("/chat", json={"session_id": sid, "message": "All done"})
+
+    from app import session as session_mod
+    s = session_mod.get(sid)
+    directive_question = next(
+        d["props"]["question"]
+        for d in resp.json()["ui_directives"]
+        if d["component"] == "ReflectionPrompt"
+    )
+    session_question = s.reflection_prompts[-1].question
+    assert directive_question == session_question, (
+        "Directive and session record different questions — random.choice called twice"
+    )
