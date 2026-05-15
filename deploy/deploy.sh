@@ -17,12 +17,12 @@ source "$SCRIPT_DIR/deploy.env"
 set +a
 
 : "${APP_HOSTNAME:?must be set in deploy.env}"
-APP_USER="${APP_USER:-ubuntu}"
+APP_USER="${APP_USER:-$(whoami)}"
 APP_DIR="${APP_DIR:-/opt/socratic-tutor/app}"
 
 if [[ "$(whoami)" != "$APP_USER" ]]; then
     echo "deploy.sh should be run as '$APP_USER' (current: $(whoami))." >&2
-    echo "Try: sudo -u $APP_USER bash $0" >&2
+    echo "Either run as $APP_USER, or update APP_USER in deploy.env." >&2
     exit 1
 fi
 

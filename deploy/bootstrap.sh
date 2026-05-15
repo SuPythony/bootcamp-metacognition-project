@@ -23,8 +23,15 @@ set +a
 
 : "${APP_HOSTNAME:?must be set in deploy.env}"
 : "${ADMIN_EMAIL:?must be set in deploy.env}"
-APP_USER="${APP_USER:-ubuntu}"
+# APP_USER defaults to whoever invoked sudo. If you ran as actual root
+# (no sudo), set APP_USER explicitly in deploy.env.
+APP_USER="${APP_USER:-${SUDO_USER:-}}"
 APP_DIR="${APP_DIR:-/opt/socratic-tutor/app}"
+if [[ -z "$APP_USER" ]]; then
+    echo "Cannot determine APP_USER (no SUDO_USER and not set in deploy.env)." >&2
+    echo "Set APP_USER in deploy.env to the OS user that should own the checkout." >&2
+    exit 1
+fi
 export APP_HOSTNAME ADMIN_EMAIL APP_USER APP_DIR
 
 if ! command -v apt >/dev/null 2>&1; then
