@@ -16,10 +16,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Phase machine** — illegal phase transitions (e.g. model jumping `clarification → wrap_up`) are clamped to current phase with a warning log rather than crashing the conversation. Bug fixed: `_apply_agent_response` no longer overwrites the already-validated phase (was re-applying the raw unclamped value).
 - **Math tools** — `algebra.py` and `graph.py` are both fully implemented. `algebra.py` uses sympy with implicit multiplication (`2x`, `3(x+1)`). `graph.py` uses matplotlib Agg backend, returns `data:image/png;base64`, clips asymptotes, also handles implicit multiplication.
 - **LaTeX rendering** — KaTeX renders throughout: chat messages, subproblem panel, thinking trace, RuleRecallPrompt, AlgebraSteps. All math is routed through `MathText.tsx` (react-markdown + remark-math + rehype-katex). Algebra tool uses `sympy.latex()` for step output.
-- **CalibrationCheck + ReflectionPrompt** — components render inline in the chat. Backend auto-injects the widgets: agent emits simple control fields (`calibration_check: "question"`, `reflection_prompt: {trigger, question}`) and the backend converts them to `ui_directives`. This is more reliable than requiring the LLM to format complex nested directive objects. Phase guard prevents `wrap_up` transition on the same turn as `calibration_check`.
+- **CalibrationCheck + ReflectionPrompt** — components render inline in the chat. Backend auto-injects the widgets from signal fields: agent emits `signal.emit_calibration_check: true` or `signal.emit_reflection: "trigger_type"` and the backend converts these to `ui_directives` with backend-curated question text. The model never generates the question text — it only names the trigger type. Phase guard prevents `wrap_up` transition on the same turn as `emit_calibration_check`. The reflection question stored in the session and shown in the directive are always the same (chosen once in `_apply_agent_response`, reused in `_build_chat_response`).
 - **Tool-call loop** — fixed: unconditional assistant message before tool result, same-tool deduplication guard, tool result sent as `"role": "user"` (Gemini follows user-role instructions more reliably than system).
 - **JSONL call logging** — every LLM call writes a structured entry to `backend/logs/llm.jsonl` (and stdout). Shape: `{ event, ts, call_id, session_id, model, latency_ms, input_tokens, output_tokens, raw_output, parse_success }`. A follow-up `llm_parse_result` event records Pydantic validation outcome. Set `LOG_LLM_CALLS=false` to suppress. `backend/logs/` is gitignored except `.gitkeep`.
-- **Probe suite** — `backend/tests/probes.py` defines 7 probes covering the Socratic discipline constraints (direct answer refusal, escape hatch, subproblem enumeration, JSON schema, one-question-per-turn, no code written, no essay drafted). Each probe carries `manual_checks` for human review. Run via `backend/tests/run_probes.py` (no server needed) or as slow pytest tests with `--run-slow`.
+- **Probe suite** — `backend/tests/probes.py` defines 9 probes covering the Socratic discipline constraints (direct answer refusal, escape hatch, subproblem enumeration, JSON schema, one-question-per-turn, no code written, no essay drafted) plus two new-schema probes (`signal_absent_is_valid`, `thinking_not_in_reply`). Each probe carries `manual_checks` for human review. Run via `backend/tests/run_probes.py` (no server needed) or as slow pytest tests with `--run-slow`.
 - **Prompt variant system** — `backend/app/prompts/variants.py` maps string keys (`base:v1`, `math:v2`, …) to prompt file paths. `load_combined(domain)` replaces `plugin_registry.get_prompt()` in `chat.py`. Server-run variant is set via `PROMPT_VARIANT_BASE` / `PROMPT_VARIANT_DOMAIN` env vars.
 
 ### What is still a stub
@@ -73,7 +73,7 @@ The probe runner calls `llm.py` directly — the FastAPI server does **not** nee
 ```bash
 cd backend
 
-# run all 7 probes
+# run all 9 probes
 python -m tests.run_probes
 
 # single probe
@@ -87,6 +87,25 @@ python -m tests.run_probes --base-variant base:v2 --domain-variant math:v2
 ```
 
 Results are appended to `backend/logs/probe_runs.jsonl`. The runner always prints a reply preview for every probe. Bold yellow `[MANUAL]` lines require human judgement — they are never counted in pass/fail.
+
+### Manual session scripts (`probes/`)
+
+`probes/` holds scripted end-to-end sessions for human testers. Each file lists the exact student turns to type verbatim, what to watch for at each turn, pass/fail criteria, and backend log checks. Use these when testing a new prompt or model — they are not automated.
+
+| File | Domain | What it tests |
+|---|---|---|
+| `probe_01_fence.md` | Math | Fence optimisation — 5 subproblems, algebra + graph tools, escape hatch likely |
+| `probe_02_bouncing_ball.md` | Math | Geometric series aha moment — graph convergence, sympy verification |
+| `probe_03_essay.md` | Essay | Disengaged student — claim narrowing, counter-argument, no paragraph written |
+| `random/test_scenario_bad_explainer.md` | General | Agent under a poor student explainer |
+| `random/test_scenario_fizzbuzz.md` | Programming | FizzBuzz — pseudocode first, then translation |
+| `random/test_scenario_gaussian.md` | Math | Gaussian integral — advanced; tests graceful degradation |
+| `random/test_scenario_skill_gap.md` | Math | Large skill gap — hint ladder stress test |
+| `random/test_scenario_tickets.md` | Math | Word problem → system of equations |
+
+### Prompt issues log (`PROMPT_ISSUES.md`)
+
+`PROMPT_ISSUES.md` in the repo root tracks known prompt-level problems (not code bugs). Each entry has a location (`socratic_base.txt` or domain prompt), a problem statement, and a concrete action. Currently 17 open issues across 6 categories: Socratic discipline (P1), student agency (P2), session structure (P3), high-friction moments (P4), tool use (P5), classifier routing (P6). Section P7 lists schema additions needed to enforce some of these at the backend level. Check this file before editing any prompt file.
 
 ### Temperature
 
@@ -233,16 +252,63 @@ For display math (`$$`), the expression must be on its own paragraph with surrou
 2. **Same-tool dedup** — if the model calls the same tool twice in a row after already receiving its result, the loop breaks and returns the existing result.
 3. **`"role": "user"` for tool result** — Gemini follows instructions in user-role messages more reliably than system-role. The tool result message is sent as `role: "user"` with a `[SYSTEM]` prefix.
 
-### CalibrationCheck + ReflectionPrompt auto-injection
+### CalibrationCheck + ReflectionPrompt auto-injection (new schema)
 
-The LLM reliably emits simple scalar fields but often skips complex nested `ui_directives` arrays. The backend auto-injects the widgets in `_build_chat_response`:
+The backend auto-injects both widgets in `_build_chat_response`. The model emits only a trigger type; the backend owns the question text.
 
-- Agent emits `control.calibration_check: "question text"` → backend injects a `CalibrationCheck` directive with `domain: "general"`, `placement: "inline"`.
-- Agent emits `control.reflection_prompt: {trigger, question}` → backend injects a `ReflectionPrompt` directive (deduplicates if the agent also manually emitted one).
+- Agent emits `signal.emit_calibration_check: true` → backend injects a `CalibrationCheck` directive. The widget question is fixed: `"Before you try — how confident are you that you'll get this right? 1 to 5."` — never model-generated.
+- Agent emits `signal.emit_reflection: "trigger_type"` → backend selects a question from `REFLECTION_QUESTIONS[trigger_type]` (defined in `chat.py`) and injects a `ReflectionPrompt` directive. The question is chosen once in `_apply_agent_response` and reused in `_build_chat_response` (via `session.pending_reflection_index`) so the directive and the session record are always consistent.
 
-Both injections deduplicate: if the agent already emitted a directive of that component name, the backend does not add a second one.
+Both injections deduplicate: if the agent already emitted a directive of that component name in `control.ui_directives`, the backend does not add a second one.
 
-**Phase guard**: if the agent emits `calibration_check` and `phase: "wrap_up"` on the same turn, the phase transition is blocked (`parsed.control.phase` is set to `None` before `_validate_phase`). This prevents the session from closing before the student answers the confidence question.
+**Phase guard**: if `signal.emit_calibration_check` is true and `control.phase == "wrap_up"` on the same turn, the phase transition is blocked (`parsed.control.phase` is set to `None` before `_validate_phase`).
+
+**Deprecated fields** — `control.calibration_check: str` and `control.reflection_prompt: dict` are kept in `AgentControl` for backward-compat parsing but are no longer read by any handler. If non-None, a debug log warns that the model is emitting old-schema fields. These will be removed once the new-schema probes have validated the model output.
+
+### Structured output schema (current — three top-level keys)
+
+The agent's JSON output has three top-level keys. This is the only valid schema; the old two-key schema (`reply` + `control`) is deprecated.
+
+```json
+{
+  "thinking": "scratchpad — stripped by backend before any processing",
+  "reply": "message to the student (null when tool_call is set)",
+  "control": {
+    "phase":             "clarification | decomposition | solving | wrap_up | null",
+    "active_subproblem": "sp-1 | null",
+    "hint_level":        null,
+    "tool_call":         { "name": "...", "args": {} } | null,
+    "ui_directives":     []
+  },
+  "signal": {
+    "subproblem_updates":      [ { "id": "sp-1", "description": "...", "goal": "...", "status": "..." } ],
+    "emit_reflection":         "periodic | self_correction | escape_hatch | wrap_up",
+    "last_reflection_quality": "shallow | decent | deep",
+    "emit_calibration_check":  true,
+    "calibration_outcome":     "correct | wrong | partial",
+    "persona_updates":         [ { "field": "...", "operation": "add | remove | set", "value": "...", "evidence": "...", "inferred": true } ],
+    "self_correction_noted":   true,
+    "escape_hatch_triggered":  true,
+    "escape_hatch_reflection": "student's one-sentence account",
+    "verification_prompted":   true,
+    "concepts_established":    [ "concept name" ],
+    "student_question_quality":"surface | probing | insightful",
+    "decomposition_source":    "student | tutor",
+    "disengagement_noted":     true,
+    "refined_query":           "clarified restatement after the framing question"
+  }
+}
+```
+
+Key rules enforced by the backend:
+
+- `thinking` is popped from the raw dict before `AgentResponse.model_validate()` and set to `None` on the parsed object. It never reaches `_apply_agent_response`, `_build_chat_response`, or the frontend.
+- `signal` is entirely optional. If absent (quiet turn), `_apply_agent_response` skips all signal handlers — no defaults are written, no errors are raised.
+- `hint_level: null` is a no-op — the active subproblem's `hints_given` is not modified. `hint_level: N` (integer) sets it.
+- `control.tool_call` non-null + `reply` longer than one sentence → backend retries once with a correction message. Non-fatal if retry fails.
+- `subproblem_updates` live in `signal`, not `control`. The deprecated `control.subproblem_updates` field is still parsed but never applied.
+
+`AgentSignal` is defined in `backend/app/chat.py`. `REFLECTION_QUESTIONS` (the trigger → question bank) is also in `chat.py`.
 
 ### Phase clamping bug (fixed)
 
