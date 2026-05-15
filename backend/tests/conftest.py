@@ -60,12 +60,13 @@ def fake_openrouter(monkeypatch):
             self.responses: list[str] = []  # raw assistant message strings
             self.status_code = 200
 
-        async def __call__(self, *, model, messages, response_format=None, timeout=60.0):
+        async def __call__(self, *, model, messages, response_format=None, temperature=None, timeout=60.0):
             self.requests.append(
                 {
                     "model": model,
                     "messages": messages,
                     "response_format": response_format,
+                    "temperature": temperature,
                 }
             )
             if self.status_code >= 400:
@@ -96,3 +97,27 @@ def tmp_persona_dir(tmp_path, monkeypatch):
     persona_dir.mkdir()
     monkeypatch.setenv("PERSONA_DIR", str(persona_dir))
     return persona_dir
+
+
+# ---------------------------------------------------------------------------
+# --run-slow flag: gate live-LLM tests behind an explicit opt-in
+# ---------------------------------------------------------------------------
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="Run slow tests that call the real LLM (requires OPENROUTER_API_KEY + LLM_MODEL_TUTOR).",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if not config.getoption("--run-slow"):
+        skip_marker = pytest.mark.skip(reason="Pass --run-slow to run live LLM tests.")
+        for item in items:
+            if "slow" in item.keywords:
+                item.add_marker(skip_marker)

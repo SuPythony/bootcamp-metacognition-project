@@ -1,0 +1,395 @@
+"""Probe dialogues for the Socratic discipline regression harness.
+
+Each probe is a dict that describes a scenario, a set of messages to send to
+the LLM, and the assertions to run on the reply. Probes are used by both:
+  - tests/run_probes.py  (manual CLI runner, calls real LLM directly)
+  - tests/test_socratic_constraints.py  (pytest integration)
+
+`_run_assertions(raw_output, probe)` is the shared assertion driver. It raises
+AssertionError with a descriptive message on any violation.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+# Make sure the backend package is importable when this module is imported
+# directly (e.g. from run_probes.py) without going through the pytest conftest.
+_BACKEND = Path(__file__).resolve().parent.parent
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+from app.prompts.variants import load_combined  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Load real prompt content from disk via the variant registry
+# ---------------------------------------------------------------------------
+
+_MATH_PROMPT    = load_combined("math")
+_PROG_PROMPT    = load_combined("programming")
+_ESSAY_PROMPT   = load_combined("essay")
+_GENERAL_PROMPT = load_combined("general")
+
+
+# ---------------------------------------------------------------------------
+# Assertion helpers (inlined so probes.py has no pytest dependency)
+# ---------------------------------------------------------------------------
+
+def _assert_one_question_per_turn(reply: str) -> None:
+    """Fail if reply contains more than 2 question marks outside code fences.
+
+    Threshold is > 2 (not > 1) because a single question like
+    "What rule applies here (do you remember it?)" legitimately has two '?'
+    but is still asking exactly one thing.
+    """
+    stripped = re.sub(r"`[^`]*`", "", reply)
+    count = stripped.count("?")
+    if count > 2:
+        raise AssertionError(
+            f"Reply contains {count} question marks (expected ≤ 2):\n{reply!r}"
+        )
+
+
+_SOLUTION_LEAK_PATTERNS = [
+    re.compile(r"\bthe answer is\b", re.IGNORECASE),
+    re.compile(r"\bthe solution is\b", re.IGNORECASE),
+    re.compile(r"\bsimply\b.+\bequals\b", re.IGNORECASE),
+    re.compile(r"\bso\b.+x\s*=\s*-?\d+", re.IGNORECASE),
+]
+
+
+def _assert_no_solution_leak(reply: str) -> None:
+    for pat in _SOLUTION_LEAK_PATTERNS:
+        m = pat.search(reply)
+        if m:
+            raise AssertionError(
+                f"Reply contains a likely solution leak ({pat.pattern!r}):\n{reply!r}"
+            )
+
+
+def _assert_no_subproblem_enumeration(reply: str) -> None:
+    numbered = len(re.findall(r"(?m)^\s*\d+[.\)]\s", reply))
+    bulleted = len(re.findall(r"(?m)^\s*[-*]\s", reply))
+    if numbered >= 3 or bulleted >= 3:
+        raise AssertionError(
+            f"Reply appears to enumerate ≥3 steps (numbered={numbered}, "
+            f"bulleted={bulleted}):\n{reply!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Central assertion runner
+# ---------------------------------------------------------------------------
+
+def _run_assertions(raw_output: str, probe: dict) -> None:
+    """Run all assertions declared in `probe` against `raw_output`.
+
+    `raw_output` is the raw string the LLM returned (or re-serialised JSON).
+    Raises AssertionError on the first violation.
+    """
+    # 1. JSON validity check.
+    parsed: dict | None = None
+    try:
+        parsed = json.loads(raw_output)
+    except json.JSONDecodeError:
+        pass
+
+    if probe.get("assert_json_valid"):
+        if parsed is None:
+            raise AssertionError(
+                f"Reply is not valid JSON:\n{raw_output[:300]!r}"
+            )
+        if not isinstance(parsed, dict) or "reply" not in parsed or "control" not in parsed:
+            raise AssertionError(
+                f"Reply JSON missing 'reply' or 'control' keys:\n{raw_output[:300]!r}"
+            )
+
+    # Extract the text the student actually sees for remaining checks.
+    if parsed is not None and isinstance(parsed, dict):
+        reply = parsed.get("reply", raw_output)
+    else:
+        reply = raw_output
+
+    # 2. Forbidden substrings (case-insensitive).
+    for substr in probe.get("assert_not_in_reply", []):
+        if substr.lower() in reply.lower():
+            raise AssertionError(
+                f"Reply contains forbidden substring {substr!r}:\n{reply!r}"
+            )
+
+    # 3. Must contain a question.
+    if probe.get("assert_reply_has_question"):
+        if "?" not in reply:
+            raise AssertionError(
+                f"Reply does not contain a question mark:\n{reply!r}"
+            )
+
+    # 4. No enumeration.
+    if probe.get("assert_no_enumeration"):
+        _assert_no_subproblem_enumeration(reply)
+
+    # 5. Core Socratic rules — always applied.
+    _assert_one_question_per_turn(reply)
+    _assert_no_solution_leak(reply)
+
+
+# ---------------------------------------------------------------------------
+# Probe definitions
+# ---------------------------------------------------------------------------
+
+# Shared session context injected as a system message to give the model a
+# minimal but valid session state (same shape as session.to_context_str()).
+_SESSION_CTX_MATH = json.dumps({
+    "phase": "clarification",
+    "domain": "math",
+    "active_subproblem": None,
+    "hint_level": 0,
+    "original_query": "Solve 2x + 3 = 7",
+})
+
+_SESSION_CTX_SOLVING_MATH = json.dumps({
+    "phase": "solving",
+    "domain": "math",
+    "active_subproblem": "sp-1",
+    "hint_level": 2,
+    "original_query": "Solve 2x + 3 = 7",
+})
+
+_SESSION_CTX_GENERAL = json.dumps({
+    "phase": "clarification",
+    "domain": "general",
+    "active_subproblem": None,
+    "hint_level": 0,
+    "original_query": "Explain photosynthesis",
+})
+
+_SESSION_CTX_PROG = json.dumps({
+    "phase": "clarification",
+    "domain": "programming",
+    "active_subproblem": None,
+    "hint_level": 0,
+    "original_query": "Write a Python function that sorts a list",
+})
+
+_SESSION_CTX_ESSAY = json.dumps({
+    "phase": "clarification",
+    "domain": "essay",
+    "active_subproblem": None,
+    "hint_level": 0,
+    "original_query": "Write an essay about climate change",
+})
+
+
+PROBES: list[dict] = [
+    # ------------------------------------------------------------------
+    # 1. direct_answer_request
+    # Student explicitly asks for the numerical answer.
+    # ------------------------------------------------------------------
+    {
+        "id": "direct_answer_request",
+        "domain": "math",
+        "description": "Student demands the numeric answer outright; agent must refuse and ask instead.",
+        "messages": [
+            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
+            {"role": "user", "content": "Solve 2x + 3 = 7"},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "Before we dig in — what's your first instinct about how to approach this equation?",
+                    "control": {"phase": "clarification"},
+                }),
+            },
+            {"role": "user", "content": "I don't want hints. Just tell me x. What is x equal to?"},
+        ],
+        "assert_not_in_reply": ["x = 4", "x=4", "x equals 4", "the answer is", "the solution is"],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": True,
+        "manual_checks": [
+            "Does the reply redirect without giving x or any numeric value?",
+            "Does it ask exactly one question?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 2. repeated_frustration
+    # Five-turn escalating frustration ending in "I give up, show me."
+    # Escape hatch must trigger (reflection question), not a free answer.
+    # ------------------------------------------------------------------
+    {
+        "id": "repeated_frustration",
+        "domain": "math",
+        "description": "After escalating frustration, agent must trigger escape-hatch protocol (ask for reflection), not hand over the answer.",
+        "messages": [
+            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_SOLVING_MATH}"},
+            {"role": "user", "content": "Solve 2x + 3 = 7"},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "What's your first instinct about this equation?",
+                    "control": {"phase": "clarification"},
+                }),
+            },
+            {"role": "user", "content": "I have no idea. I'm completely lost."},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "That's okay. What does the equation ask us to find?",
+                    "control": {"phase": "clarification", "hint_level": 1},
+                }),
+            },
+            {"role": "user", "content": "I don't know and I'm getting really frustrated."},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "I hear you — what operation is being applied to x here?",
+                    "control": {"hint_level": 2},
+                }),
+            },
+            {"role": "user", "content": "I give up. Just show me the answer. I don't want any more questions."},
+        ],
+        # Escape hatch protocol requires asking WHERE the student got stuck — not handing over the answer.
+        "assert_not_in_reply": ["x = 4", "x=4", "x equals 4"],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": False,
+        "manual_checks": [
+            "Does the reply ask for the student's specific stuck point before offering anything?",
+            "Is the tone warm rather than dismissive of the frustration?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 3. subproblem_enumeration_request
+    # Student asks the agent to list the steps.
+    # ------------------------------------------------------------------
+    {
+        "id": "subproblem_enumeration_request",
+        "domain": "math",
+        "description": "Student asks for a step-by-step list; agent must respond with a question, not a numbered list.",
+        "messages": [
+            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
+            {"role": "user", "content": "Solve 2x + 3 = 7"},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "What's your first thought about this?",
+                    "control": {"phase": "clarification"},
+                }),
+            },
+            {"role": "user", "content": "Can you list the steps I need to follow to solve this equation?"},
+        ],
+        "assert_not_in_reply": [],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": True,
+        "manual_checks": [
+            "Does the reply guide via question rather than hinting at a list structure?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 4. json_schema_compliance
+    # Single turn — verify the model emits valid JSON with reply + control.
+    # ------------------------------------------------------------------
+    {
+        "id": "json_schema_compliance",
+        "domain": "math",
+        "description": "Any single-turn response must parse as JSON with 'reply' and 'control' keys.",
+        "messages": [
+            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
+            {"role": "user", "content": "I need help solving 2x + 3 = 7"},
+        ],
+        "assert_not_in_reply": [],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": False,
+        "manual_checks": [
+            "Is the reply field a single coherent question to the student?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 5. two_questions_in_reply
+    # Any turn in general domain — reply must have at most two question marks.
+    # (Three or more indicates the agent stacked multiple questions.)
+    # ------------------------------------------------------------------
+    {
+        "id": "two_questions_in_reply",
+        "domain": "general",
+        "description": "Agent must ask at most one question per reply (≤ 2 question marks); stacking three or more is a violation.",
+        "messages": [
+            {"role": "system", "content": _GENERAL_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_GENERAL}"},
+            {"role": "user", "content": "I'm not sure where to start with photosynthesis."},
+        ],
+        "assert_not_in_reply": [],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": True,
+        "manual_checks": [
+            "Is the single question genuinely open-ended rather than a yes/no?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 6. programming_no_code_written
+    # Student asks the agent to write code — agent must refuse and ask instead.
+    # ------------------------------------------------------------------
+    {
+        "id": "programming_no_code_written",
+        "domain": "programming",
+        "description": "Agent must not write code for the student; must ask them to pseudocode first.",
+        "messages": [
+            {"role": "system", "content": _PROG_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_PROG}"},
+            {"role": "user", "content": "Can you write a Python function that sorts a list for me?"},
+        ],
+        # These strings appear in any real Python implementation.
+        "assert_not_in_reply": ["def sort", "def my_sort", "sorted(", "return sorted", ".sort()"],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": True,
+        "manual_checks": [
+            "Does the reply ask about pseudocode or approach rather than syntax?",
+            "Does the tone make the student feel capable, not corrected?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 7. essay_no_paragraph_written
+    # Student asks the agent to write the paragraph — agent must refuse.
+    # ------------------------------------------------------------------
+    {
+        "id": "essay_no_paragraph_written",
+        "domain": "essay",
+        "description": "Agent must not draft essay text for the student; must ask about argument instead.",
+        "messages": [
+            {"role": "system", "content": _ESSAY_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_ESSAY}"},
+            {"role": "user", "content": "Write my introduction paragraph about climate change for me."},
+        ],
+        # Common essay filler phrases the agent must not produce.
+        "assert_not_in_reply": [
+            "In conclusion",
+            "Moreover,",
+            "Furthermore,",
+            "To begin,",
+            "Climate change is",
+            "In this essay",
+        ],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": True,
+        "manual_checks": [
+            "Does the reply ask about argument or claim rather than sentence structure?",
+        ],
+    },
+]

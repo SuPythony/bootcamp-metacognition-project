@@ -17,7 +17,7 @@ async def test_call_tutor_returns_parsed_json(fake_openrouter):
     fake_openrouter.responses = [
         json.dumps({"reply": "hello", "control": {"phase": "clarification"}})
     ]
-    result = await llm.call_tutor(messages=[{"role": "user", "content": "hi"}])
+    result, _ = await llm.call_tutor(messages=[{"role": "user", "content": "hi"}])
     assert result["reply"] == "hello"
     assert result["control"]["phase"] == "clarification"
     # One HTTP call.
@@ -31,7 +31,7 @@ async def test_call_tutor_retries_once_on_parse_failure(fake_openrouter):
         "this is not JSON",
         json.dumps({"reply": "fixed", "control": {}}),
     ]
-    result = await llm.call_tutor(messages=[{"role": "user", "content": "hi"}])
+    result, _ = await llm.call_tutor(messages=[{"role": "user", "content": "hi"}])
     assert result["reply"] == "fixed"
     # Two HTTP calls: original + one retry.
     assert len(fake_openrouter.requests) == 2
@@ -75,7 +75,7 @@ async def test_call_classifier_returns_validated_domain(
     fake_openrouter.responses = [
         json.dumps({"domain": "math", "complexity_hint": "single-step"})
     ]
-    result = await llm.call_classifier("solve 2x+3=7")
+    result, _ = await llm.call_classifier("solve 2x+3=7")
     assert result["domain"] == "math"
     assert result["complexity_hint"] == "single-step"
 
@@ -109,7 +109,7 @@ async def test_call_classifier_supplies_default_complexity(
 ):
     """Classifier output without complexity_hint gets a default."""
     fake_openrouter.responses = [json.dumps({"domain": "math"})]
-    result = await llm.call_classifier("solve 2x+3=7")
+    result, _ = await llm.call_classifier("solve 2x+3=7")
     assert result["complexity_hint"] == "multi-step"
 
 
