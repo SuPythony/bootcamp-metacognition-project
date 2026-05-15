@@ -14,16 +14,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Frontend** — all views and components are implemented: `OnboardingView`, `SessionView`, `WrapUpView`, `ChatPane`, `SubproblemPanel`, `ToolPane`, `ThinkingTraceDrawer`, `HintBadge`, `ConfidenceWidget`, `CalibrationCheck`, `ReflectionPrompt`. Error boundary in `App.tsx` catches render crashes. API client surfaces real backend error messages (not just "Something went wrong").
 - **Mock mode** — `mock.ts` runs a scripted 7-turn conversation (clarification → decomposition → solving → wrap_up) with inline directives, subproblem updates, CalibrationCheck, ReflectionPrompt, and a rich thinking trace. Toggle via `VITE_USE_MOCK=true`.
 - **Phase machine** — illegal phase transitions (e.g. model jumping `clarification → wrap_up`) are clamped to current phase with a warning log rather than crashing the conversation. Bug fixed: `_apply_agent_response` no longer overwrites the already-validated phase (was re-applying the raw unclamped value).
-- **Math tools** — `algebra.py` is fully implemented (sympy) including implicit multiplication (`2x`, `3(x+1)`). `graph.py` raises `NotImplementedError` (still to implement).
+- **Math tools** — `algebra.py` and `graph.py` are both fully implemented. `algebra.py` uses sympy with implicit multiplication (`2x`, `3(x+1)`). `graph.py` uses matplotlib Agg backend, returns `data:image/png;base64`, clips asymptotes, also handles implicit multiplication.
 - **LaTeX rendering** — KaTeX renders throughout: chat messages, subproblem panel, thinking trace, RuleRecallPrompt, AlgebraSteps. All math is routed through `MathText.tsx` (react-markdown + remark-math + rehype-katex). Algebra tool uses `sympy.latex()` for step output.
 - **CalibrationCheck + ReflectionPrompt** — components render inline in the chat. Backend auto-injects the widgets: agent emits simple control fields (`calibration_check: "question"`, `reflection_prompt: {trigger, question}`) and the backend converts them to `ui_directives`. This is more reliable than requiring the LLM to format complex nested directive objects. Phase guard prevents `wrap_up` transition on the same turn as `calibration_check`.
 - **Tool-call loop** — fixed: unconditional assistant message before tool result, same-tool deduplication guard, tool result sent as `"role": "user"` (Gemini follows user-role instructions more reliably than system).
+- **JSONL call logging** — every LLM call writes a structured entry to `backend/logs/llm.jsonl` (and stdout). Shape: `{ event, ts, call_id, session_id, model, latency_ms, input_tokens, output_tokens, raw_output, parse_success }`. A follow-up `llm_parse_result` event records Pydantic validation outcome. Set `LOG_LLM_CALLS=false` to suppress. `backend/logs/` is gitignored except `.gitkeep`.
+- **Probe suite** — `backend/tests/probes.py` defines 7 probes covering the Socratic discipline constraints (direct answer refusal, escape hatch, subproblem enumeration, JSON schema, one-question-per-turn, no code written, no essay drafted). Each probe carries `manual_checks` for human review. Run via `backend/tests/run_probes.py` (no server needed) or as slow pytest tests with `--run-slow`.
+- **Prompt variant system** — `backend/app/prompts/variants.py` maps string keys (`base:v1`, `math:v2`, …) to prompt file paths. `load_combined(domain)` replaces `plugin_registry.get_prompt()` in `chat.py`. Server-run variant is set via `PROMPT_VARIANT_BASE` / `PROMPT_VARIANT_DOMAIN` env vars.
 
 ### What is still a stub
 
-- **Math graph tool** — `backend/specializations/math/tools/graph.py` is implemented (matplotlib, base64 PNG). Was broken due to missing venv dependencies (`matplotlib`, `numpy`) — now installed.
 - **SSE streaming** — `stream_tutor()` in `backend/app/llm.py` raises `NotImplementedError`. All chat responses are currently non-streaming (full JSON on completion). Implement SSE for word-by-word streaming (see Priority 3).
-- **Regression harness** — `backend/tests/test_socratic_constraints.py` has the assertion helpers but no seeded dialogue test cases (see Priority 4).
+- **Seeded dialogue tests** — `backend/tests/test_socratic_constraints.py` has assertion helpers and probe-backed slow tests, but no deterministic seeded dialogue test cases (canned turn sequences with hardcoded LLM replies). The probe suite covers live-LLM regression; seeded dialogues would give a fast, deterministic gate (see Priority 4).
 - **EC2 deploy** — not yet deployed; nginx + systemd setup documented below but not executed.
 - **Critique Mode** — designed and prompt-drafted (`critic_base.txt`) but deferred to v1.1.
 
@@ -39,17 +41,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Backend (`backend/`)
 
-```
+```bash
 # install (editable, with dev + math extras) — use the venv
-venv/bin/pip install -e ".[dev,math]"
+.venv/bin/pip install -e ".[dev,math]"
 
 # run the API (port 8000, no --reload)
-venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
-# tests — MUST use venv/bin/pytest (system pytest uses Python 3.9; venv is 3.10)
-venv/bin/pytest
-venv/bin/pytest tests/test_chat_flow.py      # single file
-venv/bin/pytest -k "test_socratic"          # single test by name
+# tests (fast — no LLM calls)
+.venv/bin/pytest
+.venv/bin/pytest tests/test_llm_client.py -v   # single file
+.venv/bin/pytest -k "test_socratic"            # single test by name
+
+# include live-LLM probe tests (slow, costs tokens)
+.venv/bin/pytest --run-slow -v
 
 # lint / format
 ruff check .
@@ -60,6 +65,61 @@ Required env vars (see `backend/.env.example`):
 - `LLM_MODEL_TUTOR` — main tutor model identifier (OpenRouter)
 - `LLM_MODEL_CLASSIFIER` — cheap model for domain detection
 - `OPENROUTER_API_KEY`
+
+### Running probes
+
+The probe runner calls `llm.py` directly — the FastAPI server does **not** need to be running.
+
+```bash
+cd backend
+
+# run all 7 probes
+python -m tests.run_probes
+
+# single probe
+python -m tests.run_probes --probe json_schema_compliance
+
+# override model
+python -m tests.run_probes --model google/gemini-2.5-flash
+
+# test a prompt variant without restarting the server
+python -m tests.run_probes --base-variant base:v2 --domain-variant math:v2
+```
+
+Results are appended to `backend/logs/probe_runs.jsonl`. The runner always prints a reply preview for every probe. Bold yellow `[MANUAL]` lines require human judgement — they are never counted in pass/fail.
+
+### Temperature
+
+Three independent temperature knobs, all read once at startup:
+
+| Var | Default | Why |
+|---|---|---|
+| `TUTOR_TEMPERATURE` | `0.7` | Natural variation in Socratic phrasing; too low sounds robotic |
+| `CLASSIFIER_TEMPERATURE` | `0.0` | Domain detection must be deterministic |
+| `PROBE_TEMPERATURE` | `0.3` | Low but not zero: reproducible probe runs while allowing minor phrasing variation |
+
+### Prompt variants
+
+Prompt variants let you A/B test prompt changes across a server run without touching code.
+Variant selection is **static per server process** — restart to switch.
+
+```bash
+# switch base Socratic rules to v2 for all sessions
+PROMPT_VARIANT_BASE=base:v2 .venv/bin/python -m uvicorn app.main:app ...
+
+# switch math to v2 and essay to v1; other domains use their registered defaults
+PROMPT_VARIANT_DOMAIN=math:v2,essay:v1 .venv/bin/python -m uvicorn app.main:app ...
+```
+
+Adding a new variant: create the prompt file, add one entry to `VARIANTS` in
+`backend/app/prompts/variants.py` mapping `"<domain>:<version>"` to the file path.
+Old keys stay registered so historical probe runs remain reproducible.
+
+### LLM call logs
+
+Every call is written to `backend/logs/llm.jsonl` (and stdout). Set `LOG_LLM_CALLS=false`
+to suppress all logging (e.g. in production). The logger is still initialised — only
+writes are suppressed, so toggling this at runtime (without restart) works.
 
 ### Frontend (`frontend/`)
 
@@ -98,20 +158,20 @@ Critical findings from the initial implementation pass. Read this before touchin
 # On Linux/Mac — kill running backend and restart
 pkill -f "uvicorn app.main" 2>/dev/null; sleep 1
 cd backend
-venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-**Always restart the backend after changing any `.py` file or `.txt` prompt.** Prompt changes in `socratic_base.txt` and domain `prompt.txt` files are loaded at startup — a running server will silently use stale prompts.
+**Always restart the backend after changing any `.py` file or `.txt` prompt.** Temperature and variant env vars are read once at module load — a running server will silently use stale config.
 
 Frontend Vite hot-reload works fine and does not have this problem.
 
 ### Python version and venv
 
-The system `python3` and the system `pytest` binary (`/home/mrjithin/.local/bin/pytest`) use **Python 3.9**, which fails on pydantic v2 with `str | None` union syntax even with `from __future__ import annotations`. Always use the project venv at `backend/venv/` which is Python 3.10:
+The venv is at `backend/.venv/` (Python 3.12). Always use it — never the system Python:
 
 ```
-backend/venv/bin/python   ← 3.10, use for running the server and tests
-backend/venv/bin/pytest   ← must use this, not the system pytest
+backend/.venv/bin/python   ← use for running the server and tests
+backend/.venv/bin/pytest   ← must use this, not the system pytest
 ```
 
 ### Environment configuration (`.env`)
@@ -187,6 +247,35 @@ Both injections deduplicate: if the agent already emitted a directive of that co
 ### Phase clamping bug (fixed)
 
 `_apply_agent_response` previously re-applied `session.phase = control.phase` after the caller had already set `session.phase = _validate_phase(...)`. This meant clamped phases (e.g. illegal `clarification → wrap_up`) were silently overwritten with the raw invalid value. Fixed: `_apply_agent_response` no longer touches `session.phase` — the caller owns phase transitions.
+
+### `call_tutor` and `call_classifier` return type
+
+Both return a **2-tuple** `(parsed_output, token_usage)`:
+
+```python
+raw_dict, usage = await llm.call_tutor(messages, session_id=session.session_id, temperature=_TUTOR_TEMP)
+result, usage   = await llm.call_classifier(query, temperature=_CLASSIFIER_TEMP)
+```
+
+`token_usage` shape: `{ prompt_tokens, completion_tokens, total_tokens }`. The `fake_openrouter`
+fixture in `conftest.py` patches `_post_chat` (not `call_tutor` itself), so its `Recorder`
+does not need to return a tuple — it only needs to accept the `temperature` kwarg.
+
+### One-question threshold (> 2, not > 1)
+
+`assert_one_question_per_turn` fails when a reply contains **more than 2** `?` characters.
+This allows parenthetical clarifiers like `"What rule applies here (do you remember it?)"` — two `?`
+marks, one question. A reply with 3 or more `?` marks is flagged as stacking questions.
+The threshold is consistent across `tests/test_socratic_constraints.py` and `tests/probes.py`.
+
+### Prompt variant system (`backend/app/prompts/variants.py`)
+
+`VARIANTS` maps string keys to `Path` objects. `DEFAULTS` maps role names to their current default
+key. `load_prompt(role, variant_key=None)` loads one file. `load_combined(domain, ...)` concatenates
+base + domain. `parse_domain_variants(env_value)` parses the comma-separated `PROMPT_VARIANT_DOMAIN`
+string into a `dict[domain, variant_key]` — a malformed entry (missing `:`) raises `ValueError` at
+startup rather than silently loading the wrong prompt. Old keys stay registered so historical probe
+runs against past variants remain reproducible.
 
 ---
 
@@ -1140,11 +1229,18 @@ GET /specializations
 ## LLM Prompt Construction (per turn)
 
 ```python
+from app.prompts.variants import load_combined
+
 def build_prompt(session: Session, user_message: str) -> list[dict]:
-    domain_prompt = plugin_registry.get_prompt(session.domain)  # loads specialization/prompt.txt
+    # load_combined merges base + domain prompt; honours PROMPT_VARIANT_* env vars
+    domain_prompt = load_combined(
+        session.domain,
+        base_variant=_VARIANT_BASE,
+        domain_variant=_VARIANT_DOMAIN_MAP.get(session.domain),
+    )
     persona_ctx = session.persona.to_context_str() if session.persona else ""
     return [
-        {"role": "system", "content": SOCRATIC_BASE + "\n\n" + domain_prompt},
+        {"role": "system", "content": domain_prompt},
         {"role": "system", "content": f"Student profile:\n{persona_ctx}"},
         {"role": "system", "content": f"Session state:\n{session.to_context_str()}"},
         *session.message_history,
@@ -1152,11 +1248,14 @@ def build_prompt(session: Session, user_message: str) -> list[dict]:
     ]
 ```
 
-`SOCRATIC_BASE` is a constant string (defined in `backend/app/prompts/socratic_base.txt`) that enforces the universal rules: one question at a time, never enumerate subproblems, never give the full solution, tools produce data not answers, etc. It is always prepended before the domain prompt.
+`load_combined(domain)` concatenates `socratic_base.txt` + `specializations/<domain>/prompt.txt`
+separated by `"\n\n"`. Variant keys (`base:v1`, `math:v2`, …) are resolved in
+`backend/app/prompts/variants.py`. `_VARIANT_BASE` and `_VARIANT_DOMAIN_MAP` are
+read once at `chat.py` module load from `PROMPT_VARIANT_BASE` / `PROMPT_VARIANT_DOMAIN`.
 
 `session.to_context_str()` returns a compact JSON of current phase, active subproblem, hint count, and student's stated initial understanding.
 
-The model to call is read from the `LLM_MODEL` environment variable and passed to OpenRouter. No model name is hardcoded anywhere in the application.
+The model to call is read from the `LLM_MODEL_TUTOR` / `LLM_MODEL_CLASSIFIER` environment variables and passed to OpenRouter. No model name is hardcoded anywhere in the application.
 
 ---
 
@@ -1214,7 +1313,7 @@ The product runs on the team's **AWS EC2 instance** (instance details in team ch
 
 1. SSH to EC2.
 2. `git pull` in the deploy directory.
-3. Backend: `pip install -e ".[dev,math]"`, then `sudo systemctl restart socratic-tutor`.
+3. Backend: `.venv/bin/pip install -e ".[dev,math]"`, then `sudo systemctl restart socratic-tutor`.
 4. Frontend: `npm install && npm run build`, then `sudo cp -r frontend/dist/* /var/www/socratic-tutor/`.
 5. `sudo nginx -t && sudo systemctl reload nginx`.
 
@@ -1271,7 +1370,7 @@ Both math tools are implemented:
 - `backend/specializations/math/tools/algebra.py` — sympy `parse_expr` with `implicit_multiplication_application`; outputs `sympy.latex()` per step.
 - `backend/specializations/math/tools/graph.py` — matplotlib Agg backend, plots over x_range, clips asymptotes, returns `data:image/png;base64` string. Also uses `implicit_multiplication_application` so `2x`, `3sin(x)` etc. work.
 
-Both require the venv (`matplotlib`, `numpy`, `sympy` installed via `venv/bin/pip install -e ".[dev,math]"`).
+Both require the venv (`matplotlib`, `numpy`, `sympy` installed via `.venv/bin/pip install -e ".[dev,math]"`).
 
 ### Priority 3 — SSE streaming
 
@@ -1283,15 +1382,18 @@ Both require the venv (`matplotlib`, `numpy`, `sympy` installed via `venv/bin/pi
 
 Frontend `ChatPane` needs to consume `token` events to show streaming text and the `state` event to update session state.
 
-### Priority 4 — Regression harness
+### Priority 4 — Seeded dialogue tests
 
-`backend/tests/test_socratic_constraints.py` — add at least 5 seeded dialogues per domain (math, programming, essay) asserting:
-- Agent never gives answer directly (`no_solution_leak`)
-- Agent asks only one question per turn (`one_question`)
-- Agent never enumerates subproblems (`no_enumeration`)
-- Hint escalation is sequential (no jump > +1)
+The probe suite (`tests/probes.py`) covers live-LLM regression gated behind `--run-slow`.
+What is still missing is a **fast, deterministic gate**: seeded dialogues with canned LLM
+replies injected via `fake_openrouter`, asserting the Socratic constraints hold turn-by-turn.
 
-The assertion helpers (`one_question`, `no_solution_leak`, `no_enumeration`) are already in the file.
+Add at least 3 seeded dialogues to `tests/test_socratic_constraints.py`:
+- Each dialogue is a list of `(user_message, canned_llm_reply)` pairs
+- Run assertions after each turn: `no_solution_leak`, `one_question`, `no_enumeration`
+- Cover: math (algebra), programming (pseudocode ask), essay (no drafted paragraph)
+
+Assertion helpers are already in the file. Use the `fake_openrouter` fixture from `conftest.py`.
 
 ### v1.1 (first post-MVP release)
 
