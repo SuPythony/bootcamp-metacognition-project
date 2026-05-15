@@ -150,13 +150,25 @@ pytest tests/test_socratic_constraints.py   # regression harness for Socratic ru
 
 ## Deployment (AWS EC2)
 
-1. SSH to instance
-2. `git pull`
-3. Backend: `pip install -e ".[dev,math]"` → `sudo systemctl restart socratic-tutor`
-4. Frontend: `npm install && npm run build` → `sudo cp -r frontend/dist/* /var/www/socratic-tutor/`
-5. `sudo nginx -t && sudo systemctl reload nginx`
+Scripts live under `deploy/`. The hostname is not hardcoded — copy `deploy/deploy.env.example` to `deploy/deploy.env` on the box and set `APP_HOSTNAME` (and `ADMIN_EMAIL`) once.
 
-HTTPS via Let's Encrypt. `OPENROUTER_API_KEY` in `/etc/socratic-tutor.env` (`chmod 600`), never in the repo.
+First deploy (one-time, on the box):
+
+```bash
+sudo bash deploy/bootstrap.sh           # installs deps, renders nginx + systemd, sudoers
+sudo nano /etc/socratic-tutor.env       # set OPENROUTER_API_KEY
+bash deploy/deploy.sh                   # build + publish + restart
+sudo certbot --nginx -d $APP_HOSTNAME --non-interactive --agree-tos -m $ADMIN_EMAIL
+sudo systemctl enable socratic-tutor
+```
+
+Every subsequent deploy:
+
+```bash
+ssh ubuntu@$APP_HOSTNAME && cd $APP_DIR && bash deploy/deploy.sh
+```
+
+Nginx is configured with SSE-ready directives so the future streaming work needs no infra changes. `OPENROUTER_API_KEY` lives in `/etc/socratic-tutor.env` (`chmod 600`), never in the repo. See `CLAUDE.md` § Deployment for the full file map and rationale.
 
 ---
 

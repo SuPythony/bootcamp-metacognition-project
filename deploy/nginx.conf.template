@@ -1,0 +1,51 @@
+# Socratic Tutor — nginx site config.
+# certbot --nginx appends the 443 ssl block and a redirect on first run.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${APP_HOSTNAME};
+
+    root /var/www/socratic-tutor;
+    index index.html;
+
+    # Vite emits content-addressed files under /assets/; safe to cache hard.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # Reverse proxy to the FastAPI backend.
+    # Trailing slash on proxy_pass strips the /api/ prefix: /api/chat -> /chat.
+    # SSE-ready directives are pre-baked: when stream_tutor() lands, no nginx
+    # changes are needed.
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000/;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE: don't buffer, allow long-lived streams.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
+    # SPA fallback: any other path falls through to the React index.
+    location / {
+        try_files $uri /index.html;
+    }
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 256;
+    gzip_types application/javascript text/css application/json image/svg+xml;
+
+    client_max_body_size 1m;
+}

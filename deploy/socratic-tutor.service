@@ -1,0 +1,19 @@
+# Socratic Tutor backend.
+# Sessions are held in memory by the FastAPI process, so --workers must
+# stay at 1 — a second worker would non-deterministically drop sessions.
+
+[Unit]
+Description=Socratic Tutor backend (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+WorkingDirectory=${APP_DIR}/backend
+EnvironmentFile=/etc/socratic-tutor.env
+ExecStart=${APP_DIR}/backend/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
