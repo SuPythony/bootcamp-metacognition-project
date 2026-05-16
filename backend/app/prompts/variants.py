@@ -1,15 +1,22 @@
 """Prompt variant registry.
 
-Maps string keys like "base:v1" and "math:v1" to the Path of the corresponding
-prompt file. `DEFAULTS` maps each role to its current default key. Three helper
-functions cover the access patterns the codebase needs:
+Maps string keys like "base:v1" and "math:v1" to prompt sources:
+  - Base variants ("base:*") map to a **folder** containing multiple files
+    assembled conditionally per turn by load_base_prompt().
+  - Domain variants ("math:v1", etc.) map to individual prompt files as before.
+
+`DEFAULTS` maps each role to its current default key. Four helper functions
+cover the access patterns the codebase needs:
+
+  load_base_prompt(variant_key=None, session=None, had_tool_result=False) -> str
+      Assemble the base prompt from a variant folder. Conditionally appends
+      phase and context blocks based on current session state.
 
   load_prompt(role, variant_key=None) -> str
-      Load a single prompt file by role. Pass variant_key to override the default.
+      Load a single prompt file by role (domain roles only — raises for "base").
 
   load_combined(domain, base_variant=None, domain_variant=None) -> str
-      Load and concatenate the base + domain prompt — which is what every call
-      site ultimately needs. Pass variant overrides to use non-default files.
+      Load and concatenate base + domain prompts. Used by probes (no session).
 
   parse_domain_variants(env_value) -> dict[str, str]
       Parse the PROMPT_VARIANT_DOMAIN env var format into a per-domain lookup.
@@ -33,8 +40,9 @@ _PROMPTS = _BACKEND / "app" / "prompts"
 _SPECS = _BACKEND / "specializations"
 
 VARIANTS: dict[str, Path] = {
-    "base:v1":        _PROMPTS / "socratic_base.txt",
-    "base:v2":        _PROMPTS / "socratic_base_v2.txt",
+    # Base variants map to folders; files within are assembled per-turn.
+    "base:v1":        _PROMPTS / "v1",
+    # Domain variants — flat files, unchanged.
     "math:v1":        _SPECS / "math" / "prompt.txt",
     "math:v2":        _SPECS / "math" / "prompt_v2.txt",
     "programming:v1": _SPECS / "programming" / "prompt.txt",
@@ -55,20 +63,99 @@ DEFAULTS: dict[str, str] = {
 }
 
 
-def load_prompt(role: str, variant_key: str | None = None) -> str:
-    """Load a single prompt file by role name.
+def _maybe_append(blocks: list[str], path: Path) -> None:
+    if path.exists():
+        blocks.append(path.read_text(encoding="utf-8"))
+
+
+def load_base_prompt(
+    variant_key: str | None = None,
+    session: object = None,
+    had_tool_result: bool = False,
+) -> str:
+    """Assemble the base prompt from a variant folder.
+
+    Always includes core.txt. Conditionally appends one phase block and up to
+    three context blocks based on session state. When session is None (e.g. in
+    probe runs) only core.txt is returned.
 
     Args:
-        role: One of the keys in DEFAULTS ("base", "math", etc.).
+        variant_key: Key into VARIANTS (must resolve to a folder). Defaults to
+                     DEFAULTS["base"].
+        session: Live Session object. Used to derive phase and context flags.
+                 Pass None when no session is available (probes, tests).
+        had_tool_result: True when the current /chat request carried a
+                         tool_result body field (frontend tool returning data).
+    """
+    key = variant_key or DEFAULTS["base"]
+    folder = VARIANTS[key]
+    if not folder.is_dir():
+        raise KeyError(
+            f"Variant {key!r} must map to a folder. Got: {folder}. "
+            "For base variants, VARIANTS must point at a directory."
+        )
+
+    blocks = [(folder / "core.txt").read_text(encoding="utf-8")]
+
+    # Phase block — one file per phase, named phase_<phase>.txt.
+    phase = getattr(session, "phase", None)
+    if phase is not None:
+        _maybe_append(blocks, folder / f"phase_{phase}.txt")
+
+    # Tool-result block — injected when this turn's request carried tool output.
+    if had_tool_result:
+        _maybe_append(blocks, folder / "block_tool_result.txt")
+
+    # Calibration block — injected when an open CalibrationPoint exists
+    # (student gave a confidence prediction but outcome not yet recorded).
+    calibration_pts = getattr(session, "calibration_points", [])
+    if any(cp.outcome is None for cp in calibration_pts):
+        _maybe_append(blocks, folder / "block_calibration.txt")
+
+    # Reflection-eval block — injected when the pending reflection has a student
+    # response but the quality evaluation hasn't arrived yet.
+    pending_idx = getattr(session, "pending_reflection_index", None)
+    reflection_list = getattr(session, "reflection_prompts", [])
+    if (
+        pending_idx is not None
+        and pending_idx < len(reflection_list)
+        and reflection_list[pending_idx].response is not None
+        and reflection_list[pending_idx].quality is None
+    ):
+        _maybe_append(blocks, folder / "block_reflection_eval.txt")
+
+    return "\n\n".join(blocks)
+
+
+def load_prompt(role: str, variant_key: str | None = None) -> str:
+    """Load a single prompt file by role name (domain roles only).
+
+    Do NOT call with role="base" — use load_base_prompt() instead. Raises
+    RuntimeError if called for the base role to surface this at startup.
+
+    Args:
+        role: One of the domain keys in DEFAULTS ("math", "essay", etc.).
         variant_key: Optional override. If None, uses DEFAULTS[role].
 
     Raises:
+        RuntimeError: If role == "base".
         KeyError: If role has no default and no variant_key is given.
         KeyError: If the resolved variant_key is not in VARIANTS.
+        KeyError: If the resolved path is a directory (base variant key misused).
         FileNotFoundError: If the mapped file does not exist on disk.
     """
+    if role == "base":
+        raise RuntimeError(
+            "load_prompt('base') is deprecated. "
+            "Call load_base_prompt(variant_key=..., session=...) instead."
+        )
     key = variant_key or DEFAULTS[role]
     path = VARIANTS[key]
+    if path.is_dir():
+        raise KeyError(
+            f"Variant {key!r} for role {role!r} resolves to a directory. "
+            "Domain variants must be files."
+        )
     return path.read_text(encoding="utf-8")
 
 
@@ -106,14 +193,15 @@ def load_combined(
 ) -> str:
     """Load and concatenate base + domain prompts.
 
-    Equivalent to what chat.py and probes.py were doing manually:
-        socratic_base + "\\n\\n" + domain_prompt
+    The base is assembled via load_base_prompt(session=None), so only core.txt
+    is included (no per-session conditional blocks). This is appropriate for
+    probe runs and tests that have no live session.
 
     Args:
         domain: Domain name — must match a key in DEFAULTS (e.g. "math").
-        base_variant: Optional variant key for the base prompt.
-        domain_variant: Optional variant key for the domain prompt.
+        base_variant: Optional variant key for the base prompt folder.
+        domain_variant: Optional variant key for the domain prompt file.
     """
-    base = load_prompt("base", variant_key=base_variant)
+    base = load_base_prompt(variant_key=base_variant, session=None)
     domain_prompt = load_prompt(domain, variant_key=domain_variant)
     return base + "\n\n" + domain_prompt

@@ -1,0 +1,30 @@
+================================================================================
+REFLECTION RESPONSE RECEIVED
+================================================================================
+
+The student has just responded to a reflection prompt. Evaluate their response
+and set signal.last_reflection_quality on this turn.
+
+QUALITY RUBRIC:
+
+  shallow  ~5 words, no specifics. ("It was fine." / "I dunno.")
+           Follow up with one probing question. One follow-up only — no badgering.
+
+  decent   References a specific step, formula, or moment from the session.
+           ("I used the substitution differently than last time.")
+           Acknowledge and continue.
+
+  deep     Connects that specific thing to a broader pattern, an earlier
+           mistake, or a realisation about their own thinking.
+           ("I realised I always set up the wrong variable first — I need to
+           read more carefully before jumping in.")
+           Acknowledge warmly. This is the skill the app is building.
+
+FOLLOW-UP (shallow only):
+Ask one more probing question. Examples:
+  "Can you be more specific — what exactly felt different?"
+  "What was the moment in the problem where that clicked?"
+  "What would you do differently because of that?"
+
+Set signal.last_reflection_quality before or on the same turn as the
+follow-up question.

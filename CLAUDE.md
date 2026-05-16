@@ -19,8 +19,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **CalibrationCheck + ReflectionPrompt** — components render inline in the chat. Backend auto-injects the widgets from signal fields: agent emits `signal.emit_calibration_check: true` or `signal.emit_reflection: "trigger_type"` and the backend converts these to `ui_directives` with backend-curated question text. The model never generates the question text — it only names the trigger type. Phase guard prevents `wrap_up` transition on the same turn as `emit_calibration_check`. The reflection question stored in the session and shown in the directive are always the same (chosen once in `_apply_agent_response`, reused in `_build_chat_response`).
 - **Tool-call loop** — fixed: unconditional assistant message before tool result, same-tool deduplication guard, tool result sent as `"role": "user"` (Gemini follows user-role instructions more reliably than system).
 - **JSONL call logging** — `backend/logs/llm.jsonl` receives every event: `llm_call` (tutor, with `user_message_preview`), `llm_classifier` / `llm_classifier_error`, `llm_summarizer` / `llm_summarizer_error`, and `chat_turn` (phase, hint_level, user_message, agent_reply_preview, tool_called per `/chat` call). `chat_turn` events are also written to `backend/logs/chat.jsonl` as a separate per-turn stream. Set `LOG_LLM_CALLS=false` to suppress both files. `backend/logs/` is gitignored except `.gitkeep`. Use `backend/scripts/view_logs.py` to browse `llm.jsonl` in a local web UI (requires `flask`; see script docstring).
-- **Probe suite** — `backend/tests/probes.py` defines 12 probes covering the Socratic discipline constraints (direct answer refusal, escape hatch, subproblem enumeration, JSON schema, one-question-per-turn, no code written, no essay drafted) plus new-schema probes and domain-specific probes (`programming_pseudocode_first`, `math_tool_before_answer`, `essay_claim_specificity`). New assertion helpers: `assert_no_code_written`, `assert_no_inline_algebra`, `assert_claim_pushed`. Each probe carries `manual_checks` for human review. Run via `backend/tests/run_probes.py` (no server needed) or as slow pytest tests with `--run-slow`.
-- **Prompt variant system** — `backend/app/prompts/variants.py` maps string keys (`base:v1`, `math:v2`, …) to prompt file paths. `load_combined(domain)` replaces `plugin_registry.get_prompt()` in `chat.py`. Server-run variant is set via `PROMPT_VARIANT_BASE` / `PROMPT_VARIANT_DOMAIN` env vars.
+- **Probe suite** — `backend/tests/probes.py` defines 17 probes covering Socratic discipline constraints (direct answer refusal, escape hatch, subproblem enumeration, JSON schema, one-question-per-turn, no code written, no essay drafted), schema compliance, Pólya heuristic application, and domain-specific rules (`programming_pseudocode_first`, `math_tool_before_answer`, `essay_claim_specificity`, `hint_precondition_enforced`, `student_answer_no_reasoning`, `polya_working_backward`, `clarification_uses_thinking`, `essay_counter_argument_engaged`). Assertion helpers include `assert_no_code_written`, `assert_no_inline_algebra`, `assert_claim_pushed`, `assert_hint_level_null_or_zero`, `assert_reply_contains_any`, `assert_no_direct_confirmation`, `assert_thinking_non_empty`, `assert_tool_call_set`. Each probe carries `manual_checks` for human review. Run via `backend/tests/run_probes.py` (no server needed) or as slow pytest tests with `--run-slow`.
+- **Split prompt architecture** — `backend/app/prompts/v1/` holds 8 files assembled per-turn: `core.txt` (always), `phase_{phase}.txt` (one per phase), `block_tool_result.txt` / `block_calibration.txt` / `block_reflection_eval.txt` (conditional on session state). `load_base_prompt(variant_key, session, had_tool_result)` in `variants.py` does the assembly. `chat.py` calls it every turn with the live session object; probes pass a minimal `_PhaseStub`. Domain prompts (`specializations/{domain}/prompt.txt`) are concatenated after the base.
+- **Prompt variant system** — `backend/app/prompts/variants.py` maps string keys to prompt sources. Base variants (`base:v1`, etc.) map to **folders**; domain variants (`math:v1`, etc.) map to flat files. `load_base_prompt(variant_key, session)` is used in `chat.py`; `load_combined(domain)` (probes/tests only, no live session) calls `load_base_prompt(session=None)` returning `core.txt` only. Server-run variant is set via `PROMPT_VARIANT_BASE` / `PROMPT_VARIANT_DOMAIN` env vars.
 
 ### What is still a stub
 
@@ -72,7 +73,7 @@ The following were fixed/implemented in the `prompt-upgrade` milestone (P0–P4 
 - `ThinkingTrace` interface in `types.ts` gains `reflection_prompts` and `calibration_points` fields.
 - **Known gap**: these sections are empty in real sessions because the agent rarely emits the required signals. Prompt tuning needed.
 
-**121 fast tests pass** (was 115 before this milestone).
+**126 fast tests pass** (was 115 before the prompt-upgrade milestone; +5 from 17-probe harness expansion).
 
 ---
 
@@ -112,7 +113,7 @@ The probe runner calls `llm.py` directly — the FastAPI server does **not** nee
 ```bash
 cd backend
 
-# run all 12 probes
+# run all 17 probes
 python -m tests.run_probes
 
 # single probe
@@ -126,6 +127,34 @@ python -m tests.run_probes --base-variant base:v2 --domain-variant math:v2
 ```
 
 Results are appended to `backend/logs/probe_runs.jsonl`. The runner always prints a reply preview for every probe. Bold yellow `[MANUAL]` lines require human judgement — they are never counted in pass/fail.
+
+### Socratic constraints test
+
+```bash
+cd backend
+
+# fast canned-reply tests (no LLM calls — always run)
+.venv/bin/pytest tests/test_socratic_constraints.py -v
+
+# include live-LLM slow tests (costs tokens)
+.venv/bin/pytest tests/test_socratic_constraints.py -v --run-slow
+```
+
+### Key env vars
+
+```bash
+LLM_MODEL_TUTOR=google/gemini-2.5-flash    # recommended tutor model
+LLM_MODEL_CLASSIFIER=qwen/qwen3-6b         # cheap classifier
+OPENROUTER_API_KEY=...
+
+TUTOR_TEMPERATURE=0.7                       # default; lower for more deterministic sessions
+CLASSIFIER_TEMPERATURE=0.0                  # must be deterministic
+PROBE_TEMPERATURE=0.3                       # reproducible probe runs
+
+LOG_LLM_CALLS=true                          # set false in production
+PROMPT_VARIANT_BASE=base:v1                 # base prompt folder variant
+PROMPT_VARIANT_DOMAIN=math:v2,essay:v1     # per-domain overrides (comma-separated)
+```
 
 ### Manual session scripts (`probes/`)
 
@@ -144,7 +173,7 @@ Results are appended to `backend/logs/probe_runs.jsonl`. The runner always print
 
 ### Prompt issues log (`PROMPT_ISSUES.md`)
 
-`PROMPT_ISSUES.md` in the repo root tracks known prompt-level problems (not code bugs). Each entry has a location (`socratic_base.txt` or domain prompt), a problem statement, and a concrete action. Currently 17 open issues across 6 categories: Socratic discipline (P1), student agency (P2), session structure (P3), high-friction moments (P4), tool use (P5), classifier routing (P6). Section P7 lists schema additions needed to enforce some of these at the backend level. Check this file before editing any prompt file.
+`PROMPT_ISSUES.md` in the repo root tracks known prompt-level problems (not code bugs). Two open items remain (P6.1: physics classifier routing, P7.4: backend validation rules not yet enforced). The rest are resolved and listed for reference. Check this file before editing any prompt file.
 
 ### Temperature
 
@@ -169,9 +198,7 @@ PROMPT_VARIANT_BASE=base:v2 .venv/bin/python -m uvicorn app.main:app ...
 PROMPT_VARIANT_DOMAIN=math:v2,essay:v1 .venv/bin/python -m uvicorn app.main:app ...
 ```
 
-Adding a new variant: create the prompt file, add one entry to `VARIANTS` in
-`backend/app/prompts/variants.py` mapping `"<domain>:<version>"` to the file path.
-Old keys stay registered so historical probe runs remain reproducible.
+Adding a new base variant: create a folder `backend/app/prompts/<version>/` with the same file structure as `v1/`, then add `"base:<version>": _PROMPTS / "<version>"` to `VARIANTS`. Adding a new domain variant: create the prompt file and add its path to `VARIANTS` under `"<domain>:<version>"`. Old keys stay registered so historical probe runs remain reproducible.
 
 ### LLM call logs
 
@@ -225,6 +252,59 @@ Required env vars (see `frontend/.env.example`):
 - `VITE_USE_MOCK` — `true` to use the in-browser mock, `false` to hit the backend
 
 Frontend has no linter configured yet; rely on `tsc` via `npm run typecheck`.
+
+---
+
+## Prompt Architecture
+
+The base prompt is assembled per-turn from a folder of files, not a single flat file. This lets the same `core.txt` be combined with different phase and context blocks without duplicating shared content.
+
+### Folder layout (`backend/app/prompts/v1/`)
+
+| File | When included |
+|---|---|
+| `core.txt` | Always. Universal Socratic rules, constraints 1–8, structured output contract, math formatting. |
+| `phase_clarification.txt` | When `session.phase == "clarification"`. |
+| `phase_decomposition.txt` | When `session.phase == "decomposition"`. |
+| `phase_solving.txt` | When `session.phase == "solving"`. |
+| `phase_wrap_up.txt` | When `session.phase == "wrap_up"`. |
+| `block_tool_result.txt` | When the `/chat` request carried a `tool_result` field. |
+| `block_calibration.txt` | When an open `CalibrationPoint` exists (prediction given, outcome not yet recorded). |
+| `block_reflection_eval.txt` | When a pending reflection has a student response but no quality evaluation yet. |
+
+The domain prompt (`backend/specializations/{domain}/prompt.txt`) is always concatenated after the assembled base.
+
+### Assembly
+
+`load_base_prompt(variant_key, session, had_tool_result)` in `variants.py` reads `core.txt`, then conditionally appends phase and context blocks based on live session state. `chat.py` calls it every turn with the live `Session` object.
+
+In probes and tests, `_load_probe_prompt(domain, phase)` passes a minimal `_PhaseStub` (just `phase` + empty calibration/reflection state) so the correct phase block is included without a real session. `load_combined(domain)` (for tests without any session) calls `load_base_prompt(session=None)` — returns `core.txt` only — then appends the domain prompt.
+
+### Pólya roles across phases
+
+- **Clarification** (`phase_clarification.txt`) — Pólya Step 1. Instructs the agent to use `thinking` to model likely misconceptions before writing any `reply`. Heuristic language must not appear in `reply`.
+- **Decomposition** (`phase_decomposition.txt`) — Pólya Step 2 (Devise a Plan). Shapes the questions implicitly; the student names the structure.
+- **Solving** (`phase_solving.txt`) — Pólya Steps 2–3. Level-3 hint escalations are Pólya heuristics (working backward, simpler problem, analogy, specialisation, pattern) matched to the student's specific type of stuck-ness. Level 0–2 are pre-heuristic.
+- **Wrap-up** (`phase_wrap_up.txt`) — Pólya Step 4 (Look Back). Drives synthesis and surfaces the delta between `initial_understanding` and current articulation.
+
+### Adding a new variant
+
+For a new base variant (e.g. `base:v2`): create `backend/app/prompts/v2/` with the same file structure as `v1/`, add `"base:v2": _PROMPTS / "v2"` to `VARIANTS` in `variants.py`. For a new domain variant: create the file and add its path under `"<domain>:<version>"`. Old keys stay registered so historical probe runs remain reproducible.
+
+### Output schema
+
+Every agent response is a single JSON object with three always-present keys plus an optional `signal` block:
+
+```json
+{
+  "thinking": "scratchpad — stripped by backend before any processing",
+  "reply": "message to student — null when tool_call is set",
+  "control": { "phase": "...", "active_subproblem": "...", "hint_level": null, "tool_call": null, "ui_directives": [] },
+  "signal": { "subproblem_updates": [], "emit_reflection": "...", ... }
+}
+```
+
+`signal` is entirely optional — omit the block on quiet turns. `hint_level: null` is a no-op (does not touch the active subproblem's `hints_given` counter). See `core.txt` for the full field-by-field contract and all `signal` fields.
 
 ---
 
