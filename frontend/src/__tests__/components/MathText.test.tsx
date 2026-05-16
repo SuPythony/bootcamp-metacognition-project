@@ -1,6 +1,6 @@
 import { render } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
-import MathText from "./MathText";
+import MathText from "../../components/MathText";
 
 describe("MathText — plain text", () => {
   it("renders plain text unchanged", () => {
@@ -86,6 +86,34 @@ describe("MathText — inline prop", () => {
   it("wraps paragraph content in <p> when inline is not set", () => {
     const { container } = render(<MathText>{"Some text"}</MathText>);
     expect(container.querySelector("p")).not.toBeNull();
+  });
+});
+
+describe("MathText — null / undefined children", () => {
+  it("renders empty without crashing when children is null", () => {
+    const { container } = render(
+      <MathText>{null as unknown as string}</MathText>
+    );
+    expect(container.textContent).toBe("");
+  });
+
+  it("renders empty without crashing when children is undefined", () => {
+    const { container } = render(
+      <MathText>{undefined as unknown as string}</MathText>
+    );
+    expect(container.textContent).toBe("");
+  });
+
+  it("renders empty without crashing on empty string", () => {
+    const { container } = render(<MathText>{""}</MathText>);
+    expect(container.textContent).toBe("");
+  });
+
+  it("does not crash with inline + null", () => {
+    const { container } = render(
+      <MathText inline>{null as unknown as string}</MathText>
+    );
+    expect(container.textContent).toBe("");
   });
 });
 
