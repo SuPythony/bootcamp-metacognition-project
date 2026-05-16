@@ -231,9 +231,11 @@ export async function chat(_body: ChatRequest): Promise<ChatResponse> {
 }
 
 export async function personaCreate(
-  username: string,
+  _username: string,
 ): Promise<PersonaCreateResponse> {
-  return { status: "pending", session_id: `mock-persona-${username}` };
+  return {
+    status: "exists",  // mock always acts as existing user to skip onboarding
+  };
 }
 
 export async function thinkingTrace(_sessionId: string): Promise<ThinkingTrace> {

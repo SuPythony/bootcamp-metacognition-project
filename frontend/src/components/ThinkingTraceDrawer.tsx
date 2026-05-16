@@ -121,6 +121,71 @@ export default function ThinkingTraceDrawer({ trace }: { trace: ThinkingTrace })
           </div>
         </section>
       )}
+
+      {/* Calibration summary */}
+      {trace.calibration_points && trace.calibration_points.length > 0 && (() => {
+        const points = trace.calibration_points!;
+        const correct = points.filter((p) => p.outcome === "correct").length;
+        return (
+          <section className="space-y-2">
+            <h3 className="font-semibold text-gray-800 text-sm">Calibration</h3>
+            <p className="text-sm text-gray-500">
+              You made {points.length} prediction{points.length !== 1 ? "s" : ""} — got {correct} right.
+            </p>
+            <div className="space-y-1">
+              {points.map((p, i) => (
+                <div key={i} className="flex items-center gap-2 text-xs text-gray-600">
+                  <span className="font-mono text-gray-400">{p.subproblem_id}</span>
+                  <span>predicted {p.predicted_confidence}/5</span>
+                  {p.outcome && (
+                    <span
+                      className={
+                        p.outcome === "correct"
+                          ? "text-green-600"
+                          : p.outcome === "partial"
+                          ? "text-amber-600"
+                          : "text-red-500"
+                      }
+                    >
+                      → {p.outcome}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        );
+      })()}
+
+      {/* Reflections */}
+      {trace.reflection_prompts && trace.reflection_prompts.filter((r) => r.response).length > 0 && (
+        <section className="space-y-2">
+          <h3 className="font-semibold text-gray-800 text-sm">Reflections</h3>
+          <div className="space-y-3">
+            {trace.reflection_prompts
+              .filter((r) => r.response)
+              .map((r, i) => (
+                <div key={i} className="border rounded-xl p-3 space-y-1">
+                  <p className="text-xs text-gray-500">{r.question}</p>
+                  <p className="text-sm text-gray-800 italic">"{r.response}"</p>
+                  {r.quality && (
+                    <span
+                      className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
+                        r.quality === "deep"
+                          ? "bg-green-100 text-green-700"
+                          : r.quality === "decent"
+                          ? "bg-amber-100 text-amber-700"
+                          : "bg-gray-100 text-gray-500"
+                      }`}
+                    >
+                      {r.quality}
+                    </span>
+                  )}
+                </div>
+              ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

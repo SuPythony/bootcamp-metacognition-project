@@ -45,10 +45,10 @@ export const api = {
   chat(body: ChatRequest): Promise<ChatResponse> {
     return USE_MOCK ? mock.chat(body) : post("/chat", body);
   },
-  personaCreate(username: string): Promise<PersonaCreateResponse> {
+  personaCreate(username: string, opts?: { confirm?: boolean }): Promise<PersonaCreateResponse> {
     return USE_MOCK
       ? mock.personaCreate(username)
-      : post("/persona/create", { username });
+      : post("/persona/create", { username, confirm: opts?.confirm ?? false });
   },
   personaReset(username: string): Promise<{ status: "reset" }> {
     return USE_MOCK

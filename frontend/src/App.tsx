@@ -30,7 +30,8 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: string |
 }
 
 type Route =
-  | { kind: "onboarding" }
+  | { kind: "onboarding"; initialStep?: "username" | "query"; initialUsername?: string }
+  | { kind: "persona_session"; sessionId: string; openingMessage: string; username: string }
   | { kind: "session"; sessionId: string; domain: Domain; openingMessage: string }
   | { kind: "wrap_up"; sessionId: string };
 
@@ -42,12 +43,34 @@ export default function App() {
       return (
         <ErrorBoundary>
           <OnboardingView
+            initialStep={route.initialStep}
+            initialUsername={route.initialUsername}
             onSessionStart={(sessionId, openingMessage, domain) =>
               setRoute({ kind: "session", sessionId, domain, openingMessage })
+            }
+            onPersonaSession={(sessionId, openingMessage, username) =>
+              setRoute({ kind: "persona_session", sessionId, openingMessage, username })
             }
           />
         </ErrorBoundary>
       );
+    case "persona_session": {
+      const { sessionId, openingMessage, username } = route;
+      return (
+        <ErrorBoundary>
+          <SessionView
+            sessionId={sessionId}
+            domain="persona"
+            openingMessage={openingMessage}
+            onWrapUp={() => setRoute({ kind: "onboarding" })}
+            onOnboardingComplete={() => {
+              // Persona intake done — send user to Step 2 to type their problem
+              setRoute({ kind: "onboarding", initialStep: "query", initialUsername: username });
+            }}
+          />
+        </ErrorBoundary>
+      );
+    }
     case "session":
       return (
         <ErrorBoundary>
