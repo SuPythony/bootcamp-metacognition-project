@@ -56,7 +56,7 @@ export default function WrapUpView({
           />
         )}
 
-        {!isLoading && trace && (
+        {!isLoading && (trace || error) && (
           <button
             onClick={onRestart}
             className="w-full py-3 bg-accent text-white rounded-md text-body-emphasis hover:opacity-90 active:scale-[0.99] transition-all"

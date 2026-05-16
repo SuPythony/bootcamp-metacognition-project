@@ -94,6 +94,7 @@ export default function OnboardingView({
       onSessionStart(session.session_id, session.opening_message, session.domain, q);
     } catch {
       setError("Could not connect. Is the backend running?");
+    } finally {
       setIsLoading(false);
     }
   }

@@ -1,9 +1,13 @@
 import { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
-import { CornerDownLeft, Send } from "lucide-react";
+import { CornerDownLeft, Send, X } from "lucide-react";
 import MathText from "./MathText";
 import type { UIDirective, Domain } from "../api/types";
 import { lookup } from "../specializations/registry";
+
+function directiveKey(d: UIDirective): string {
+  return `${d.placement}::${d.component}::${JSON.stringify(d.props)}`;
+}
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -62,6 +66,7 @@ export default function ChatPane({
   inputDisabled,
   onSend,
   onDirectiveResponse,
+  onDismissDirective,
   domain,
 }: {
   messages: ChatMessage[];
@@ -69,6 +74,7 @@ export default function ChatPane({
   inputDisabled?: boolean;
   onSend: (text: string) => void;
   onDirectiveResponse?: (component: string, value: unknown) => void;
+  onDismissDirective?: (key: string) => void;
   domain?: Domain;
 }) {
   const disabled = isLoading || inputDisabled === true;
@@ -79,9 +85,17 @@ export default function ChatPane({
     messages[lastMsgIdx]?.content === "";
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Auto-scroll only if user is already near the bottom. Otherwise they're
+  // scrolled up reading an earlier turn — yanking them back is disorienting.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 120) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages, isLoading]);
 
   function handleSend() {
@@ -93,7 +107,7 @@ export default function ChatPane({
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
         {messages.map((msg, i) => (
           <div key={i} className="space-y-3">
             {msg.role === "user" ? (
@@ -111,8 +125,19 @@ export default function ChatPane({
                   const key = `${d.domain}.${d.component}`;
                   const Component = lookup(key);
                   if (!Component) return null;
+                  const dKey = directiveKey(d);
                   return (
-                    <div key={j} className="pl-4 mt-1">
+                    <div key={`${j}-${dKey}`} className="pl-4 mt-1 relative group">
+                      {onDismissDirective && (
+                        <button
+                          type="button"
+                          onClick={() => onDismissDirective(dKey)}
+                          aria-label="Dismiss prompt"
+                          className="absolute top-1 right-1 z-10 inline-flex h-5 w-5 items-center justify-center rounded-md text-ink-faint hover:text-ink hover:bg-surface-muted opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                        >
+                          <X size={12} strokeWidth={1.8} />
+                        </button>
+                      )}
                       <Component
                         {...d.props}
                         onSelect={(value: unknown) =>

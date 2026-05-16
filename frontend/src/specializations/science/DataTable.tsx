@@ -13,9 +13,9 @@ export default function DataTable({
       >
         <thead className="sticky top-0 bg-surface-muted">
           <tr>
-            {columns.map((c) => (
+            {columns.map((c, i) => (
               <th
-                key={c}
+                key={`c-${i}`}
                 scope="col"
                 className="font-display text-body-emphasis text-ink text-left px-3 py-2 border-b border-rule whitespace-nowrap"
               >

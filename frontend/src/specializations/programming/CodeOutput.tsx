@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 
 export default function CodeOutput({
@@ -11,13 +11,21 @@ export default function CodeOutput({
   exit_code: number;
 }) {
   const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ok = exit_code === 0;
   const combined = [stdout, stderr].filter(Boolean).join("\n");
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   function handleCopy() {
     void navigator.clipboard.writeText(combined).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopied(false), 1400);
     });
   }
 

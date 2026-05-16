@@ -10,7 +10,74 @@ import PhaseStepper from "../components/PhaseStepper";
 import MathText from "../components/MathText";
 import { Brandmark } from "../components/brand/Brandmark";
 import { ThemeToggle } from "../components/theme/ThemeToggle";
-import { lookup, has } from "../specializations/registry";
+import { lookup } from "../specializations/registry";
+
+// Directives that require a single-click answer and should block chat input
+// until the student responds. Display-only / type-into-chat directives
+// (ReflectionPrompt, PseudocodePad, OutlineTree) are intentionally excluded.
+export const INTERACTIVE_DIRECTIVES = new Set([
+  "CalibrationCheck",
+  "ConfidenceWidget",
+  "RuleRecallPrompt",
+]);
+
+const VALID_LIFETIMES = new Set<UIDirective["lifetime"]>([
+  "until_dismissed",
+  "until_next_turn",
+  "persistent_in_subproblem",
+]);
+
+// Normalize unknown / missing lifetime values to until_next_turn so the
+// directive is guaranteed to be cleared on the next student turn rather than
+// sticking around forever.
+export function normalizeDirective(d: UIDirective): UIDirective {
+  if (VALID_LIFETIMES.has(d.lifetime)) return d;
+  return { ...d, lifetime: "until_next_turn" };
+}
+
+// Stable string key for a directive — used to identify dismissed instances
+// (UIDirective has no server-assigned id field).
+export function directiveKey(d: UIDirective): string {
+  return `${d.placement}::${d.component}::${JSON.stringify(d.props)}`;
+}
+
+// Active subproblem id, or null. Used to detect transitions so we can clear
+// persistent_in_subproblem directives when the focus changes.
+export function getActiveSubproblemId(subproblems: Subproblem[]): string | null {
+  return subproblems.find((s) => s.status === "active")?.id ?? null;
+}
+
+// Pure helper: merge new side-panel directives into an existing list,
+// dropping duplicates of (component, props). Prevents the panel from growing
+// unbounded when the agent re-emits the same directive every turn.
+export function mergeSidePanelDirectives(
+  prev: UIDirective[],
+  incoming: UIDirective[],
+): UIDirective[] {
+  if (incoming.length === 0) return prev;
+  const key = (d: UIDirective) => `${d.component}::${JSON.stringify(d.props)}`;
+  const seen = new Set(prev.map(key));
+  const fresh = incoming.filter((d) => !seen.has(key(d)));
+  return fresh.length === 0 ? prev : [...prev, ...fresh];
+}
+
+// Pure helper: returns true if the last assistant message has an interactive
+// inline directive whose component is actually registered. Unknown components
+// and display-only directives must not lock the input.
+export function isAwaitingDirective(
+  messages: ChatMessage[],
+  componentExists: (key: string) => boolean,
+): boolean {
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  return Boolean(
+    lastAssistant?.directives?.some(
+      (d) =>
+        d.placement === "inline" &&
+        INTERACTIVE_DIRECTIVES.has(d.component) &&
+        componentExists(`${d.domain}.${d.component}`),
+    ),
+  );
+}
 
 export default function SessionView({
   sessionId,
@@ -38,6 +105,10 @@ export default function SessionView({
   const [isLoading, setIsLoading] = useState(false);
   const [problemOpen, setProblemOpen] = useState(false);
   const problemBtnRef = useRef<HTMLButtonElement | null>(null);
+  // Synchronous lock — isLoading state updates asynchronously, so rapid Enter
+  // presses or directive clicks could otherwise double-fire before the disabled
+  // state takes effect. A ref flips immediately and is checked at entry.
+  const inFlightRef = useRef(false);
 
   async function send(message?: string, directiveResponse?: { component: string; value: unknown }) {
     setIsLoading(true);
@@ -71,31 +142,44 @@ export default function SessionView({
         });
       },
       onState(res) {
-        const inlineDirectives = res.ui_directives?.filter((d) => d.placement === "inline") ?? [];
-        const sidePanelNew   = res.ui_directives?.filter((d) => d.placement === "side_panel") ?? [];
-        const modalNew        = res.ui_directives?.filter((d) => d.placement === "modal") ?? [];
+        const allDirectives = (res.ui_directives ?? []).map(normalizeDirective);
+        const inlineDirectives = allDirectives.filter((d) => d.placement === "inline");
+        const sidePanelNew = allDirectives.filter((d) => d.placement === "side_panel");
+        const modalNew = allDirectives.filter((d) => d.placement === "modal");
 
-        // Patch the last assistant message with final content + directives.
+        // Patch the streaming bubble with final content + directives.
+        // Drop the empty bubble if reply is null and there are no inline
+        // directives (tool-only turns), so we don't leave an empty assistant
+        // message in the chat.
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
           if (last?.role === "assistant") {
-            updated[updated.length - 1] = {
-              ...last,
-              content: res.reply ?? last.content,
-              directives: inlineDirectives,
-            };
+            if (!res.reply && inlineDirectives.length === 0 && !last.content) {
+              updated.pop();
+            } else {
+              updated[updated.length - 1] = {
+                ...last,
+                content: res.reply ?? last.content,
+                directives: inlineDirectives,
+              };
+            }
           }
           return updated;
         });
 
         if (res.subproblems?.length > 0) setSubproblems(res.subproblems);
         if (res.phase) setPhase(res.phase);
-        if (sidePanelNew.length > 0) setSidePanelDirectives((prev) => [...prev, ...sidePanelNew]);
+        if (sidePanelNew.length > 0) {
+          setSidePanelDirectives((prev) =>
+            mergeSidePanelDirectives(prev, sidePanelNew),
+          );
+        }
         if (res.tool_calls?.length > 0) setToolResults(res.tool_calls);
         if (modalNew.length > 0) setModalDirective(modalNew[0]);
 
         setIsLoading(false);
+        inFlightRef.current = false;
 
         if (res.onboarding_complete) {
           setTimeout(() => onOnboardingComplete?.(), 1200);
@@ -115,14 +199,61 @@ export default function SessionView({
           return updated;
         });
         setIsLoading(false);
+        inFlightRef.current = false;
       },
     });
   }
 
   function handleSend(text: string) {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     send(text);
   }
+
+  function handleDismissDirective(key: string) {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.role === "assistant" && m.directives
+          ? {
+              ...m,
+              directives: m.directives.filter((d) => directiveKey(d) !== key),
+            }
+          : m,
+      ),
+    );
+    setSidePanelDirectives((prev) =>
+      prev.filter((d) => directiveKey(d) !== key),
+    );
+  }
+
+  // Clear persistent_in_subproblem directives when the active subproblem
+  // changes. Tracked by ref so we don't fire on the initial render.
+  const lastActiveSpRef = useRef<string | null>(null);
+  useEffect(() => {
+    const active = getActiveSubproblemId(subproblems);
+    if (active !== lastActiveSpRef.current) {
+      const prevActive = lastActiveSpRef.current;
+      lastActiveSpRef.current = active;
+      if (prevActive !== null) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.role === "assistant" && m.directives
+              ? {
+                  ...m,
+                  directives: m.directives.filter(
+                    (d) => d.lifetime !== "persistent_in_subproblem",
+                  ),
+                }
+              : m,
+          ),
+        );
+        setSidePanelDirectives((prev) =>
+          prev.filter((d) => d.lifetime !== "persistent_in_subproblem"),
+        );
+      }
+    }
+  }, [subproblems]);
 
   function formatDirectiveValue(component: string, value: unknown): string {
     if (component === "CalibrationCheck" && typeof value === "number") {
@@ -140,7 +271,13 @@ export default function SessionView({
   }
 
   function handleDirectiveResponse(component: string, value: unknown) {
-    setModalDirective(null);
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    // Only close the modal if the response IS for the modal directive.
+    // Answering an unrelated inline widget should not dismiss an open modal.
+    if (modalDirective && modalDirective.component === component) {
+      setModalDirective(null);
+    }
     const text = formatDirectiveValue(component, value);
     setMessages((prev) => {
       const cleared = prev.map((m, i) =>
@@ -153,19 +290,9 @@ export default function SessionView({
     send(undefined, { component, value });
   }
 
-  // Block chat input while an inline directive on the latest assistant message
-  // is awaiting an answer. Reflection prompts ask the student to type — those
-  // don't block. Unknown components are ignored so a hallucinated directive
-  // doesn't softlock the chat (the widget can't render, so there's nothing to
-  // respond to — let the student type instead).
-  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-  const awaitingDirective = Boolean(
-    lastAssistant?.directives?.some(
-      (d) =>
-        d.placement === "inline" &&
-        d.component !== "ReflectionPrompt" &&
-        has(`${d.domain}.${d.component}`),
-    ),
+  const awaitingDirective = isAwaitingDirective(
+    messages,
+    (key) => lookup(key) !== undefined,
   );
 
   useEffect(() => {
@@ -216,19 +343,21 @@ export default function SessionView({
             </span>
           </div>
           <div className="flex-1 flex justify-center min-w-0">
-            <PhaseStepper phase={phase} />
+            {domain !== "persona" && <PhaseStepper phase={phase} />}
           </div>
           <div className="flex items-center gap-2 shrink-0 relative">
-            <button
-              ref={problemBtnRef}
-              onClick={() => setProblemOpen((o) => !o)}
-              aria-expanded={problemOpen}
-              aria-controls="original-problem-popover"
-              className="inline-flex items-center gap-1.5 text-caption text-ink-soft hover:text-ink border border-rule rounded-md px-2 py-1 transition-colors"
-            >
-              <FileText size={12} strokeWidth={1.8} />
-              Problem
-            </button>
+            {originalQuery && (
+              <button
+                ref={problemBtnRef}
+                onClick={() => setProblemOpen((o) => !o)}
+                aria-expanded={problemOpen}
+                aria-controls="original-problem-popover"
+                className="inline-flex items-center gap-1.5 text-caption text-ink-soft hover:text-ink border border-rule rounded-md px-2 py-1 transition-colors"
+              >
+                <FileText size={12} strokeWidth={1.8} />
+                Problem
+              </button>
+            )}
             <ThemeToggle />
             <button
               onClick={onWrapUp}
@@ -275,6 +404,7 @@ export default function SessionView({
             inputDisabled={awaitingDirective}
             onSend={handleSend}
             onDirectiveResponse={handleDirectiveResponse}
+            onDismissDirective={handleDismissDirective}
             domain={domain}
           />
         </div>
@@ -289,6 +419,7 @@ export default function SessionView({
         toolResults={toolResults}
         domain={domain}
         onDirectiveResponse={handleDirectiveResponse}
+        onDismissDirective={handleDismissDirective}
       />
 
       {/* Modal overlay — only mount if the component is registered */}
