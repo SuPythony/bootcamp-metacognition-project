@@ -224,6 +224,10 @@ async def call_tutor(
             parsed = None
 
         if parsed is not None:
+            _user_preview = next(
+                (m["content"][:300] for m in reversed(messages) if m.get("role") == "user"),
+                None,
+            )
             _write_log({
                 "event": "llm_call",
                 "ts":  datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -234,6 +238,7 @@ async def call_tutor(
                 "input_tokens": usage["prompt_tokens"],
                 "output_tokens": usage["completion_tokens"],
                 "raw_output": raw_content,
+                "user_message_preview": _user_preview,
                 "parse_success": None,
             })
             return parsed, usage
@@ -259,6 +264,10 @@ async def call_tutor(
         raw_content = _strip_fences(_extract_content(response))
         try:
             parsed = json.loads(raw_content)
+            _user_preview = next(
+                (m["content"][:300] for m in reversed(messages) if m.get("role") == "user"),
+                None,
+            )
             _write_log({
                 "event": "llm_call",
                 "ts":  datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -269,6 +278,7 @@ async def call_tutor(
                 "input_tokens": combined_usage["prompt_tokens"],
                 "output_tokens": combined_usage["completion_tokens"],
                 "raw_output": raw_content,
+                "user_message_preview": _user_preview,
                 "parse_success": None,
             })
             return parsed, combined_usage
@@ -310,7 +320,11 @@ async def call_tutor(
         raise
 
 
-async def call_classifier(query: str, temperature: float | None = None) -> tuple[dict, dict]:
+async def call_classifier(
+    query: str,
+    temperature: float | None = None,
+    session_id: str = "classifier",
+) -> tuple[dict, dict]:
     """Domain classifier. Returns ({ "domain": str, "complexity_hint": str }, token_usage).
 
     The returned `domain` must be one of the user-facing domains registered in
@@ -319,6 +333,8 @@ async def call_classifier(query: str, temperature: float | None = None) -> tuple
     token_usage shape: { prompt_tokens, completion_tokens, total_tokens }.
     """
     model = _env("LLM_MODEL_CLASSIFIER")
+    call_id = str(uuid.uuid4())
+    t0 = time.monotonic()
     # Build a tight system prompt that constrains output to JSON.
     # Domain list is supplied at call time rather than baked in, so adding
     # a new specialization auto-flows through here without code edits.
@@ -342,30 +358,61 @@ async def call_classifier(query: str, temperature: float | None = None) -> tuple
         {"role": "user", "content": query},
     ]
     response_format = {"type": "json_object"}
-    response = await _post_chat(
-        model=model, messages=messages, response_format=response_format,
-        temperature=temperature,
-    )
-    usage = _extract_usage(response)
-    content = _strip_fences(_extract_content(response))
     try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as e:
-        raise LLMParseError(
-            f"Classifier output did not parse as JSON: {content[:200]!r}"
-        ) from e
-
-    # Some models return a bare JSON string ("math") instead of an object.
-    if isinstance(parsed, str):
-        parsed = {"domain": parsed}
-
-    if parsed.get("domain") not in domains:
-        raise LLMClassifierError(
-            f"Classifier returned domain {parsed.get('domain')!r}, "
-            f"which is not in {domains!r}"
+        response = await _post_chat(
+            model=model, messages=messages, response_format=response_format,
+            temperature=temperature,
         )
-    parsed.setdefault("complexity_hint", "multi-step")
-    return parsed, usage
+        usage = _extract_usage(response)
+        content = _strip_fences(_extract_content(response))
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as e:
+            _write_log({
+                "event": "llm_classifier_error",
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "call_id": call_id, "session_id": session_id, "model": model,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                "query": query, "error": f"JSON parse error: {e}",
+            })
+            raise LLMParseError(
+                f"Classifier output did not parse as JSON: {content[:200]!r}"
+            ) from e
+
+        # Some models return a bare JSON string ("math") instead of an object.
+        if isinstance(parsed, str):
+            parsed = {"domain": parsed}
+
+        if parsed.get("domain") not in domains:
+            raise LLMClassifierError(
+                f"Classifier returned domain {parsed.get('domain')!r}, "
+                f"which is not in {domains!r}"
+            )
+        parsed.setdefault("complexity_hint", "multi-step")
+        _write_log({
+            "event": "llm_classifier",
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "call_id": call_id, "session_id": session_id, "model": model,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+            "input_tokens": usage["prompt_tokens"],
+            "output_tokens": usage["completion_tokens"],
+            "query": query, "result": parsed,
+        })
+        return parsed, usage
+    except (LLMError, LLMParseError, LLMClassifierError):
+        raise
+    except Exception as e:
+        _write_log({
+            "event": "llm_classifier_error",
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "call_id": call_id, "session_id": session_id, "model": model,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+            "input_tokens": 0, "output_tokens": 0,
+            "query": query, "error": str(e),
+        })
+        raise
 
 
 async def call_summarizer(
@@ -395,6 +442,8 @@ async def call_summarizer(
         f"Recent student messages (most recent last):\n{student_block}"
     )
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    call_id = str(uuid.uuid4())
+    t0 = time.monotonic()
     try:
         response = await _post_chat(
             model=model,
@@ -405,12 +454,30 @@ async def call_summarizer(
         usage = _extract_usage(response)
         content = _strip_fences(_extract_content(response))
         parsed = json.loads(content)
-        return {
+        result = {
             "final_understanding": str(parsed.get("final_understanding", "")),
             "delta_label": str(parsed.get("delta_label", "small")),
             "delta_evidence": str(parsed.get("delta_evidence", "")),
         }
+        _write_log({
+            "event": "llm_summarizer",
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "call_id": call_id, "session_id": session_id, "model": model,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+            "input_tokens": usage["prompt_tokens"],
+            "output_tokens": usage["completion_tokens"],
+            "result": result,
+        })
+        return result
     except Exception as exc:  # noqa: BLE001
+        _write_log({
+            "event": "llm_summarizer_error",
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "call_id": call_id, "session_id": session_id, "model": model,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+            "input_tokens": 0, "output_tokens": 0,
+            "error": str(exc),
+        })
         logging.getLogger("app.llm").warning("call_summarizer failed: %s", exc)
         return {
             "final_understanding": None,

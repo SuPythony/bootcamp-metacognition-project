@@ -13,17 +13,51 @@ validation (phase legality, hint clamping) happens after parse.
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
 import random
+import sys
 import uuid
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 _log = logging.getLogger("app.chat")
+
+
+# ---------------------------------------------------------------------------
+# Chat-turn JSONL logger (separate from llm.jsonl)
+# ---------------------------------------------------------------------------
+
+def _setup_chat_logger() -> logging.Logger:
+    logger = logging.getLogger("chat.turns")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    fmt = logging.Formatter("%(message)s")
+    logs_dir = Path(__file__).resolve().parent.parent / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    fh = logging.FileHandler(logs_dir / "chat.jsonl", encoding="utf-8")
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
+    return logger
+
+
+def _write_chat_log(entry: dict) -> None:
+    if os.environ.get("LOG_LLM_CALLS", "true").lower() in ("false", "0", "no"):
+        return
+    try:
+        _setup_chat_logger().debug(json.dumps(entry))
+    except Exception:
+        pass
 
 from app import llm, persona as persona_mod, plugin_registry
 from app import session as session_mod
@@ -320,6 +354,18 @@ def _apply_agent_response(session: Session, parsed: AgentResponse) -> None:
             idx = session.pending_reflection_index
             if idx is not None and idx < len(session.reflection_prompts):
                 session.reflection_prompts[idx].quality = signal.last_reflection_quality
+            else:
+                # Quality arrived without a pending index (e.g. agent evaluated two turns late).
+                # Walk back to attach to the most recent un-evaluated reflection.
+                for rp in reversed(session.reflection_prompts):
+                    if rp.quality is None:
+                        rp.quality = signal.last_reflection_quality
+                        break
+                else:
+                    _log.warning(
+                        "last_reflection_quality=%r arrived but no pending reflection found; discarded",
+                        signal.last_reflection_quality,
+                    )
             session.pending_reflection_index = None
 
         # Calibration outcome attaches to the most recent open calibration point.
@@ -745,9 +791,29 @@ async def chat(req: ChatRequest) -> ChatResponse:
         and session.phase == "wrap_up"
         and parsed.control.persona
     ):
-        persona_mod.handle_persona_wrap_up(session.username, parsed.control.persona)
+        persona_mod.handle_persona_wrap_up(
+            session.username, parsed.control.persona, session_id=session.session_id
+        )
         onboarding_complete = True
 
+    _write_chat_log({
+        "event": "chat_turn",
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "session_id": req.session_id,
+        "turn": session.metrics.turns_total,
+        "phase": session.phase,
+        "active_subproblem": session.active_subproblem_id,
+        "hint_level": session.current_hint_level(),
+        "input_kind": (
+            "message" if req.message is not None
+            else "directive_response" if req.directive_response is not None
+            else "tool_result"
+        ),
+        "user_message": req.message,
+        "agent_reply_preview": (parsed.reply or "")[:120],
+        "tool_called": (parsed.control.tool_call.get("name") if isinstance(parsed.control.tool_call, dict) else None),
+        "phase_after": session.phase,
+    })
     session_mod.put(session)
     return _build_chat_response(
         session,
