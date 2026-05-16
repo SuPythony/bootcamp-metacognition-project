@@ -15,7 +15,7 @@ export function Brandmark({ size = 28, wordmark = false, className, style }: Bra
         height={size}
         viewBox="0 0 28 28"
         role="img"
-        aria-label="Loom"
+        aria-label="Aporeka"
         className="text-accent"
       >
         <rect x="0.5" y="0.5" width="27" height="27" rx="6" className="fill-accent-soft" />
@@ -37,7 +37,7 @@ export function Brandmark({ size = 28, wordmark = false, className, style }: Bra
       </svg>
       {wordmark && (
         <span className="font-display text-[1.25rem] font-semibold tracking-tight text-ink">
-          Loom
+          Aporeka
         </span>
       )}
     </div>

@@ -105,7 +105,12 @@ export default function OnboardingView({
       className="min-h-screen bg-paper flex flex-col"
     >
       <header className="flex items-center justify-between px-6 py-5">
-        <Brandmark wordmark />
+        <div className="flex flex-col gap-0.5">
+          <Brandmark wordmark />
+          <p className="text-caption text-ink-faint pl-[36px]">
+            The AI never solves the problem. It guides the student to solve it themselves.
+          </p>
+        </div>
         <ThemeToggle />
       </header>
 
