@@ -128,7 +128,7 @@ async def _post_chat(
 ) -> dict:
     """Single POST to OpenRouter's chat-completions endpoint. Raises LLMError
     on non-2xx. Retries up to _max_retries times on 429, honouring Retry-After."""
-    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "1024"))
+    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
     payload: dict[str, Any] = {"model": model, "messages": messages, "max_tokens": max_tokens}
     if response_format is not None:
         payload["response_format"] = response_format
@@ -567,7 +567,7 @@ async def stream_tutor(
     the thinking section, control block, and signal block are invisible to callers.
     """
     model = _env("LLM_MODEL_TUTOR")
-    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "1024"))
+    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
     call_id = str(uuid.uuid4())
     t0 = time.monotonic()
 

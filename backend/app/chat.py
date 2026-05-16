@@ -804,6 +804,7 @@ async def _chat_sse_generator(
         for iteration in range(_MAX_TOOL_ITERATIONS):
             # Stream the LLM call — emit token events as reply chars arrive.
             full_raw: dict | None = None
+            stream_error: str | None = None
             async for etype, edata in llm.stream_tutor(
                 messages, session_id=session.session_id, temperature=_TUTOR_TEMP
             ):
@@ -812,12 +813,30 @@ async def _chat_sse_generator(
                 elif etype == "state":
                     full_raw = edata
                 elif etype == "error":
-                    yield _sse("error", {"message": edata})
-                    return
+                    stream_error = edata
+                    break  # exit inner loop; fall through to non-streaming retry
 
             if full_raw is None:
-                yield _sse("error", {"message": "No response received from model"})
-                return
+                if stream_error is not None:
+                    # Streaming parse failed (usually truncated JSON at token limit).
+                    # Retry once with non-streaming call_tutor so the user never sees
+                    # the error. Any partial tokens already sent will be overwritten
+                    # when the state event arrives with the full reply.
+                    _log.warning(
+                        "session=%s SSE streaming parse failed, retrying non-streaming: %s",
+                        session.session_id[:8], stream_error[:120],
+                    )
+                    try:
+                        raw_dict, _ = await llm.call_tutor(
+                            messages, session_id=session.session_id, temperature=_TUTOR_TEMP
+                        )
+                        full_raw = raw_dict
+                    except Exception as retry_exc:
+                        yield _sse("error", {"message": f"Streaming failed and retry failed: {retry_exc}"})
+                        return
+                else:
+                    yield _sse("error", {"message": "No response received from model"})
+                    return
 
             full_raw.pop("thinking", None)
             try:
