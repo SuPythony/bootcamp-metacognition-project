@@ -179,6 +179,30 @@ Every call is written to `backend/logs/llm.jsonl` (and stdout). Set `LOG_LLM_CAL
 to suppress all logging (e.g. in production). The logger is still initialised — only
 writes are suppressed, so toggling this at runtime (without restart) works.
 
+`chat_turn` events are mirrored into `llm.jsonl` as well as their own `chat.jsonl`, so
+the log viewer sees everything in one file.
+
+### Log viewer
+
+`backend/scripts/view_logs.py` is a local Flask web UI for browsing `llm.jsonl`.
+
+```bash
+# install dependency (one-off; already in pyproject.toml)
+cd backend && .venv/bin/pip install flask
+
+# launch viewer
+cd backend && .venv/bin/python scripts/view_logs.py logs/llm.jsonl
+
+# custom host/port
+cd backend && .venv/bin/python scripts/view_logs.py logs/llm.jsonl --host 0.0.0.0 --port 5001
+```
+
+Open `http://127.0.0.1:5000`. Features:
+- Filter by **session** or **event type** (llm_call, llm_classifier, chat_turn, …)
+- Collapsible cards showing thinking / reply / control / signal per turn
+- **Refresh Logs** button re-reads the file without restarting the server
+- **Readable Export** / **JSONL Export** of selected entries
+
 ### Frontend (`frontend/`)
 
 ```
