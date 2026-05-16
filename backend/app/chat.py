@@ -799,13 +799,19 @@ async def chat(req: ChatRequest) -> ChatResponse:
     session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
 
     onboarding_complete = False
-    if (
-        session.domain == "persona"
-        and session.phase == "wrap_up"
-        and parsed.control.persona
-    ):
+    if session.domain == "persona" and session.phase == "wrap_up":
+        # Build persona stub from signal.persona_updates (new schema: model emits
+        # individual field updates, not a nested control.persona dict).
+        persona_payload: dict = {}
+        if parsed.signal and parsed.signal.persona_updates:
+            for upd in parsed.signal.persona_updates:
+                if upd.get("operation") == "set" and upd.get("field") and upd.get("value") is not None:
+                    persona_payload[upd["field"]] = upd["value"]
+        # Fallback: old schema emitted control.persona directly.
+        if not persona_payload and parsed.control.persona:
+            persona_payload = parsed.control.persona
         persona_mod.handle_persona_wrap_up(
-            session.username, parsed.control.persona, session_id=session.session_id
+            session.username, persona_payload, session_id=session.session_id
         )
         onboarding_complete = True
 
