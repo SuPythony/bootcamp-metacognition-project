@@ -18,12 +18,14 @@ export default function SessionView({
   openingMessage,
   originalQuery,
   onWrapUp,
+  onOnboardingComplete,
 }: {
   sessionId: string;
   domain: Domain;
   openingMessage: string;
   originalQuery: string;
   onWrapUp: () => void;
+  onOnboardingComplete?: () => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: "assistant", content: openingMessage },
@@ -74,7 +76,10 @@ export default function SessionView({
       if (res.tool_calls?.length > 0) setToolResults(res.tool_calls);
       if (modalNew.length > 0) setModalDirective(modalNew[0]);
 
-      if (res.phase === "wrap_up") {
+      if (res.onboarding_complete) {
+        // Persona intake finished — go back to onboarding so user can enter problem
+        setTimeout(() => onOnboardingComplete?.(), 1200);
+      } else if (res.phase === "wrap_up") {
         // Small delay so the wrap-up message is visible before transitioning
         setTimeout(onWrapUp, 1800);
       }

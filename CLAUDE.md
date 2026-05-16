@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-**Frontend and backend core loop are fully implemented and running end-to-end.** The Socratic chat loop works in production (OpenRouter → Gemini 2.5 Flash), phase transitions are validated, the subproblem panel updates live, the thinking trace renders at wrap-up, LaTeX renders throughout, the algebra tool works, and CalibrationCheck/ReflectionPrompt widgets render inline in real-LLM mode. Mock mode (`VITE_USE_MOCK=true`) runs a scripted 7-turn conversation without any API calls.
+**Frontend and backend core loop are fully implemented and running end-to-end.** The Socratic chat loop works in production (OpenRouter → Gemini 2.5 Flash), phase transitions are validated, the subproblem panel updates live, the thinking trace renders at wrap-up, LaTeX renders throughout, the algebra tool works, and CalibrationCheck/ReflectionPrompt widgets render inline in real-LLM mode. Mock mode (`VITE_USE_MOCK=true`) runs a scripted 7-turn conversation without any API calls. Persona onboarding now routes through a real chat session end-to-end. Science tools (graph, data_table) are fully implemented. Domain prompts for programming, essay, and science are substantially expanded. The thinking-trace endpoint now computes `final_understanding` via a lightweight LLM summariser call.
 
 ### What is real and working
 
@@ -16,10 +16,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Phase machine** — illegal phase transitions (e.g. model jumping `clarification → wrap_up`) are clamped to current phase with a warning log rather than crashing the conversation. Bug fixed: `_apply_agent_response` no longer overwrites the already-validated phase (was re-applying the raw unclamped value).
 - **Math tools** — `algebra.py` and `graph.py` are both fully implemented. `algebra.py` uses sympy with implicit multiplication (`2x`, `3(x+1)`). `graph.py` uses matplotlib Agg backend, returns `data:image/png;base64`, clips asymptotes, also handles implicit multiplication.
 - **LaTeX rendering** — KaTeX renders throughout: chat messages, subproblem panel, thinking trace, RuleRecallPrompt, AlgebraSteps. All math is routed through `MathText.tsx` (react-markdown + remark-math + rehype-katex). Algebra tool uses `sympy.latex()` for step output.
-- **CalibrationCheck + ReflectionPrompt** — components render inline in the chat. Backend auto-injects the widgets: agent emits simple control fields (`calibration_check: "question"`, `reflection_prompt: {trigger, question}`) and the backend converts them to `ui_directives`. This is more reliable than requiring the LLM to format complex nested directive objects. Phase guard prevents `wrap_up` transition on the same turn as `calibration_check`.
+- **CalibrationCheck + ReflectionPrompt** — components render inline in the chat. Backend auto-injects the widgets from signal fields: agent emits `signal.emit_calibration_check: true` or `signal.emit_reflection: "trigger_type"` and the backend converts these to `ui_directives` with backend-curated question text. The model never generates the question text — it only names the trigger type. Phase guard prevents `wrap_up` transition on the same turn as `emit_calibration_check`. The reflection question stored in the session and shown in the directive are always the same (chosen once in `_apply_agent_response`, reused in `_build_chat_response`).
 - **Tool-call loop** — fixed: unconditional assistant message before tool result, same-tool deduplication guard, tool result sent as `"role": "user"` (Gemini follows user-role instructions more reliably than system).
-- **JSONL call logging** — every LLM call writes a structured entry to `backend/logs/llm.jsonl` (and stdout). Shape: `{ event, ts, call_id, session_id, model, latency_ms, input_tokens, output_tokens, raw_output, parse_success }`. A follow-up `llm_parse_result` event records Pydantic validation outcome. Set `LOG_LLM_CALLS=false` to suppress. `backend/logs/` is gitignored except `.gitkeep`.
-- **Probe suite** — `backend/tests/probes.py` defines 7 probes covering the Socratic discipline constraints (direct answer refusal, escape hatch, subproblem enumeration, JSON schema, one-question-per-turn, no code written, no essay drafted). Each probe carries `manual_checks` for human review. Run via `backend/tests/run_probes.py` (no server needed) or as slow pytest tests with `--run-slow`.
+- **JSONL call logging** — `backend/logs/llm.jsonl` receives every event: `llm_call` (tutor, with `user_message_preview`), `llm_classifier` / `llm_classifier_error`, `llm_summarizer` / `llm_summarizer_error`, and `chat_turn` (phase, hint_level, user_message, agent_reply_preview, tool_called per `/chat` call). `chat_turn` events are also written to `backend/logs/chat.jsonl` as a separate per-turn stream. Set `LOG_LLM_CALLS=false` to suppress both files. `backend/logs/` is gitignored except `.gitkeep`. Use `backend/scripts/view_logs.py` to browse `llm.jsonl` in a local web UI (requires `flask`; see script docstring).
+- **Probe suite** — `backend/tests/probes.py` defines 12 probes covering the Socratic discipline constraints (direct answer refusal, escape hatch, subproblem enumeration, JSON schema, one-question-per-turn, no code written, no essay drafted) plus new-schema probes and domain-specific probes (`programming_pseudocode_first`, `math_tool_before_answer`, `essay_claim_specificity`). New assertion helpers: `assert_no_code_written`, `assert_no_inline_algebra`, `assert_claim_pushed`. Each probe carries `manual_checks` for human review. Run via `backend/tests/run_probes.py` (no server needed) or as slow pytest tests with `--run-slow`.
 - **Prompt variant system** — `backend/app/prompts/variants.py` maps string keys (`base:v1`, `math:v2`, …) to prompt file paths. `load_combined(domain)` replaces `plugin_registry.get_prompt()` in `chat.py`. Server-run variant is set via `PROMPT_VARIANT_BASE` / `PROMPT_VARIANT_DOMAIN` env vars.
 
 ### What is still a stub
@@ -28,12 +28,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Seeded dialogue tests** — `backend/tests/test_socratic_constraints.py` has assertion helpers and probe-backed slow tests, but no deterministic seeded dialogue test cases (canned turn sequences with hardcoded LLM replies). The probe suite covers live-LLM regression; seeded dialogues would give a fast, deterministic gate (see Priority 4).
 - **EC2 deploy** — not yet deployed; nginx + systemd setup documented below but not executed.
 - **Critique Mode** — designed and prompt-drafted (`critic_base.txt`) but deferred to v1.1.
+- **Wrap-up / reflection rendering** — `ThinkingTraceDrawer` now renders calibration and reflection sections, but the data is often empty in practice: the agent rarely emits `emit_reflection` or `emit_calibration_check` in real sessions due to prompt gaps. The UI is wired; the prompt needs tuning to actually trigger these flows.
 
 ### Next milestones (in order)
 
-1. Implement SSE streaming in `stream_tutor()` and wire it into the frontend ChatPane
-2. Add seeded dialogue test cases to `test_socratic_constraints.py`
-3. Deploy to EC2
+1. Fix wrap-up/reflection rendering: tune prompts so the agent reliably emits calibration and reflection signals
+2. Implement SSE streaming in `stream_tutor()` and wire it into the frontend ChatPane
+3. Add seeded dialogue test cases to `test_socratic_constraints.py`
+4. Deploy to EC2
+
+### Recent changes (prompt-upgrade branch)
+
+The following were fixed/implemented in the `prompt-upgrade` milestone (P0–P4 + L1/U1/E1):
+
+**P0–P4 (core loop fixes)**
+- **Persona onboarding end-to-end** — `OnboardingView` now routes a "pending" persona response to a `persona_session` route in `App.tsx`, which runs the 2-turn intake as a real `SessionView` with `domain="persona"`. After the agent emits `wrap_up`, the `onOnboardingComplete` callback fires and routes back to onboarding Step 2. `handle_persona_wrap_up()` deletes the onboarding session from memory after saving the persona.
+- **Two-step onboarding UI** — `OnboardingView` is now a two-step form: Step 1 asks for username only (calls `personaCreate`), Step 2 asks for the problem. A `confirm_new` status from `/persona/create` shows an inline "Start fresh?" confirmation before creating an account, preventing typo-driven account creation. "← Not {name}?" resets to Step 1.
+- **Thinking trace `final_understanding`** — the `/session/{id}/thinking-trace` endpoint now calls `llm.call_summarizer()` (uses the cheap classifier model) with the student's initial understanding and the last 4 student messages. Returns `final_understanding`, `understanding_delta_label`, `understanding_delta_evidence`. Gracefully returns `None` on failure.
+- **Tool `display_data` sent to LLM** — the tool result message now includes `display_data` (the full step-by-step algebra output, table data, etc.) so the agent can comment on what the student sees, not just the raw result string.
+- **Session context extended** — `to_context_str()` now includes subproblem `goal`, `hints_given`, `direct_answer_requested` per subproblem, plus session-level `self_corrections` and `turns_total`. Gives the agent the pacing data to make escalation decisions.
+- **Tool result validation** — `dispatch_tool()` validates that `module.run()` returns a dict with a `'result'` key, raising `RuntimeError` immediately instead of `KeyError` deep in `_run_chat_turn`.
+- **Reflection quality orphan fix** — if `last_reflection_quality` arrives without a pending reflection index (agent evaluated two turns late), the backend now walks backwards to find and attach quality to the most recent un-evaluated reflection, with a warning log if none is found.
+- **Science tools implemented** — `science/tools/graph.py` delegates to the math graph implementation. `science/tools/data_table.py` is a full pass-through formatter returning `{"result": "...", "display_data": {"columns": ..., "rows": ...}, "ui_component": "DataTable"}`.
+- **Math tool edge cases** — algebra: multi-`=` validation, factorization fixed (`!=` instead of `isinstance(Mul)`), "No real solution" wording. Graph: `x_range` isfinite validation, complex-output warning, adaptive sample density (`max(500, min(2000, int(span*50)))`).
+- **Domain prompts substantially expanded** — programming: 9 → ~70 lines (pseudocode-first gate, code_runner usage, debugging guidance, hint ladder); essay: 8 → ~75 lines (claim specificity gate, evidence quality, counter-argument mandate, OutlineTree directive); science: 5 → ~65 lines (observable grounding, no-formulae rule, tool usage, experimental design).
+- **12 probes, 3 new assertion helpers** — `assert_no_code_written`, `assert_no_inline_algebra`, `assert_claim_pushed`. New probes: `programming_pseudocode_first`, `math_tool_before_answer`, `essay_claim_specificity`.
+
+**L1 (exhaustive logging)**
+- `call_classifier` now emits `llm_classifier` / `llm_classifier_error` JSONL events with query, result, model, latency, tokens.
+- `call_summarizer` now emits `llm_summarizer` / `llm_summarizer_error` JSONL events.
+- `call_tutor` now adds `user_message_preview` (last user message, 300 chars) to the `llm_call` event.
+- `/chat` handler now emits a `chat_turn` event to `backend/logs/chat.jsonl` with phase, hint_level, user_message, agent_reply_preview, tool_called per turn.
+- 3 new fast tests in `test_logging.py`.
+
+**U1 (username-first UI)**
+- `/persona/create` gains `confirm: bool = False`. New users without `confirm=True` get `status: "confirm_new"` — no session is created.
+- `OnboardingView` is now two-step: username → problem. `confirm_new` shows inline confirmation prompt.
+- `App.tsx` `persona_session` route no longer holds `pendingQuery`; after persona intake, routes to `{ kind: "onboarding", initialStep: "query" }`.
+- 3 new fast tests in `test_persona.py`.
+
+**E1 (wrap-up/reflection improvements)**
+- `ThinkingTraceDrawer` now renders a Calibration section (predicted confidence vs. outcome per subproblem) and a Reflections section (question / answer / quality badge).
+- `ThinkingTrace` interface in `types.ts` gains `reflection_prompts` and `calibration_points` fields.
+- **Known gap**: these sections are empty in real sessions because the agent rarely emits the required signals. Prompt tuning needed.
+
+**121 fast tests pass** (was 115 before this milestone).
 
 ---
 
@@ -73,7 +112,7 @@ The probe runner calls `llm.py` directly — the FastAPI server does **not** nee
 ```bash
 cd backend
 
-# run all 7 probes
+# run all 12 probes
 python -m tests.run_probes
 
 # single probe
@@ -87,6 +126,25 @@ python -m tests.run_probes --base-variant base:v2 --domain-variant math:v2
 ```
 
 Results are appended to `backend/logs/probe_runs.jsonl`. The runner always prints a reply preview for every probe. Bold yellow `[MANUAL]` lines require human judgement — they are never counted in pass/fail.
+
+### Manual session scripts (`probes/`)
+
+`probes/` holds scripted end-to-end sessions for human testers. Each file lists the exact student turns to type verbatim, what to watch for at each turn, pass/fail criteria, and backend log checks. Use these when testing a new prompt or model — they are not automated.
+
+| File | Domain | What it tests |
+|---|---|---|
+| `probe_01_fence.md` | Math | Fence optimisation — 5 subproblems, algebra + graph tools, escape hatch likely |
+| `probe_02_bouncing_ball.md` | Math | Geometric series aha moment — graph convergence, sympy verification |
+| `probe_03_essay.md` | Essay | Disengaged student — claim narrowing, counter-argument, no paragraph written |
+| `random/test_scenario_bad_explainer.md` | General | Agent under a poor student explainer |
+| `random/test_scenario_fizzbuzz.md` | Programming | FizzBuzz — pseudocode first, then translation |
+| `random/test_scenario_gaussian.md` | Math | Gaussian integral — advanced; tests graceful degradation |
+| `random/test_scenario_skill_gap.md` | Math | Large skill gap — hint ladder stress test |
+| `random/test_scenario_tickets.md` | Math | Word problem → system of equations |
+
+### Prompt issues log (`PROMPT_ISSUES.md`)
+
+`PROMPT_ISSUES.md` in the repo root tracks known prompt-level problems (not code bugs). Each entry has a location (`socratic_base.txt` or domain prompt), a problem statement, and a concrete action. Currently 17 open issues across 6 categories: Socratic discipline (P1), student agency (P2), session structure (P3), high-friction moments (P4), tool use (P5), classifier routing (P6). Section P7 lists schema additions needed to enforce some of these at the backend level. Check this file before editing any prompt file.
 
 ### Temperature
 
@@ -120,6 +178,30 @@ Old keys stay registered so historical probe runs remain reproducible.
 Every call is written to `backend/logs/llm.jsonl` (and stdout). Set `LOG_LLM_CALLS=false`
 to suppress all logging (e.g. in production). The logger is still initialised — only
 writes are suppressed, so toggling this at runtime (without restart) works.
+
+`chat_turn` events are mirrored into `llm.jsonl` as well as their own `chat.jsonl`, so
+the log viewer sees everything in one file.
+
+### Log viewer
+
+`backend/scripts/view_logs.py` is a local Flask web UI for browsing `llm.jsonl`.
+
+```bash
+# install dependency (one-off; already in pyproject.toml)
+cd backend && .venv/bin/pip install flask
+
+# launch viewer
+cd backend && .venv/bin/python scripts/view_logs.py logs/llm.jsonl
+
+# custom host/port
+cd backend && .venv/bin/python scripts/view_logs.py logs/llm.jsonl --host 0.0.0.0 --port 5001
+```
+
+Open `http://127.0.0.1:5000`. Features:
+- Filter by **session** or **event type** (llm_call, llm_classifier, chat_turn, …)
+- Collapsible cards showing thinking / reply / control / signal per turn
+- **Refresh Logs** button re-reads the file without restarting the server
+- **Readable Export** / **JSONL Export** of selected entries
 
 ### Frontend (`frontend/`)
 
@@ -233,16 +315,63 @@ For display math (`$$`), the expression must be on its own paragraph with surrou
 2. **Same-tool dedup** — if the model calls the same tool twice in a row after already receiving its result, the loop breaks and returns the existing result.
 3. **`"role": "user"` for tool result** — Gemini follows instructions in user-role messages more reliably than system-role. The tool result message is sent as `role: "user"` with a `[SYSTEM]` prefix.
 
-### CalibrationCheck + ReflectionPrompt auto-injection
+### CalibrationCheck + ReflectionPrompt auto-injection (new schema)
 
-The LLM reliably emits simple scalar fields but often skips complex nested `ui_directives` arrays. The backend auto-injects the widgets in `_build_chat_response`:
+The backend auto-injects both widgets in `_build_chat_response`. The model emits only a trigger type; the backend owns the question text.
 
-- Agent emits `control.calibration_check: "question text"` → backend injects a `CalibrationCheck` directive with `domain: "general"`, `placement: "inline"`.
-- Agent emits `control.reflection_prompt: {trigger, question}` → backend injects a `ReflectionPrompt` directive (deduplicates if the agent also manually emitted one).
+- Agent emits `signal.emit_calibration_check: true` → backend injects a `CalibrationCheck` directive. The widget question is fixed: `"Before you try — how confident are you that you'll get this right? 1 to 5."` — never model-generated.
+- Agent emits `signal.emit_reflection: "trigger_type"` → backend selects a question from `REFLECTION_QUESTIONS[trigger_type]` (defined in `chat.py`) and injects a `ReflectionPrompt` directive. The question is chosen once in `_apply_agent_response` and reused in `_build_chat_response` (via `session.pending_reflection_index`) so the directive and the session record are always consistent.
 
-Both injections deduplicate: if the agent already emitted a directive of that component name, the backend does not add a second one.
+Both injections deduplicate: if the agent already emitted a directive of that component name in `control.ui_directives`, the backend does not add a second one.
 
-**Phase guard**: if the agent emits `calibration_check` and `phase: "wrap_up"` on the same turn, the phase transition is blocked (`parsed.control.phase` is set to `None` before `_validate_phase`). This prevents the session from closing before the student answers the confidence question.
+**Phase guard**: if `signal.emit_calibration_check` is true and `control.phase == "wrap_up"` on the same turn, the phase transition is blocked (`parsed.control.phase` is set to `None` before `_validate_phase`).
+
+**Deprecated fields** — `control.calibration_check: str` and `control.reflection_prompt: dict` are kept in `AgentControl` for backward-compat parsing but are no longer read by any handler. If non-None, a debug log warns that the model is emitting old-schema fields. These will be removed once the new-schema probes have validated the model output.
+
+### Structured output schema (current — three top-level keys)
+
+The agent's JSON output has three top-level keys. This is the only valid schema; the old two-key schema (`reply` + `control`) is deprecated.
+
+```json
+{
+  "thinking": "scratchpad — stripped by backend before any processing",
+  "reply": "message to the student (null when tool_call is set)",
+  "control": {
+    "phase":             "clarification | decomposition | solving | wrap_up | null",
+    "active_subproblem": "sp-1 | null",
+    "hint_level":        null,
+    "tool_call":         { "name": "...", "args": {} } | null,
+    "ui_directives":     []
+  },
+  "signal": {
+    "subproblem_updates":      [ { "id": "sp-1", "description": "...", "goal": "...", "status": "..." } ],
+    "emit_reflection":         "periodic | self_correction | escape_hatch | wrap_up",
+    "last_reflection_quality": "shallow | decent | deep",
+    "emit_calibration_check":  true,
+    "calibration_outcome":     "correct | wrong | partial",
+    "persona_updates":         [ { "field": "...", "operation": "add | remove | set", "value": "...", "evidence": "...", "inferred": true } ],
+    "self_correction_noted":   true,
+    "escape_hatch_triggered":  true,
+    "escape_hatch_reflection": "student's one-sentence account",
+    "verification_prompted":   true,
+    "concepts_established":    [ "concept name" ],
+    "student_question_quality":"surface | probing | insightful",
+    "decomposition_source":    "student | tutor",
+    "disengagement_noted":     true,
+    "refined_query":           "clarified restatement after the framing question"
+  }
+}
+```
+
+Key rules enforced by the backend:
+
+- `thinking` is popped from the raw dict before `AgentResponse.model_validate()` and set to `None` on the parsed object. It never reaches `_apply_agent_response`, `_build_chat_response`, or the frontend.
+- `signal` is entirely optional. If absent (quiet turn), `_apply_agent_response` skips all signal handlers — no defaults are written, no errors are raised.
+- `hint_level: null` is a no-op — the active subproblem's `hints_given` is not modified. `hint_level: N` (integer) sets it.
+- `control.tool_call` non-null + `reply` longer than one sentence → backend retries once with a correction message. Non-fatal if retry fails.
+- `subproblem_updates` live in `signal`, not `control`. The deprecated `control.subproblem_updates` field is still parsed but never applied.
+
+`AgentSignal` is defined in `backend/app/chat.py`. `REFLECTION_QUESTIONS` (the trigger → question bank) is also in `chat.py`.
 
 ### Phase clamping bug (fixed)
 

@@ -44,6 +44,7 @@ export interface ChatResponse {
   subproblems: Subproblem[];
   tool_calls: ToolCall[];
   ui_directives: UIDirective[];
+  onboarding_complete?: boolean;
 }
 
 export interface SessionNewRequest {
@@ -87,9 +88,10 @@ export interface Persona {
 }
 
 export interface PersonaCreateResponse {
-  status: "exists" | "pending";
+  status: "exists" | "pending" | "confirm_new";
   session_id?: string;
   persona?: Persona;
+  opening_message?: string;
 }
 
 export interface ThinkingTrace {
@@ -109,6 +111,17 @@ export interface ThinkingTrace {
   final_understanding: string;
   understanding_delta_label: "significant" | "moderate" | "small";
   understanding_delta_evidence: string;
+  reflection_prompts?: Array<{
+    trigger: string;
+    question: string;
+    response: string | null;
+    quality: "shallow" | "decent" | "deep" | null;
+  }>;
+  calibration_points?: Array<{
+    subproblem_id: string;
+    predicted_confidence: number;
+    outcome: "correct" | "wrong" | "partial" | null;
+  }>;
 }
 
 export interface SpecializationManifestEntry {

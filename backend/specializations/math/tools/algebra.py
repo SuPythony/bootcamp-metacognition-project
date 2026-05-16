@@ -164,7 +164,14 @@ def _op_simplify(expression: str, _variable: str | None) -> tuple[list[dict], st
 
 
 def _op_solve(expression: str, variable: str | None) -> tuple[list[dict], str]:
-    if "=" in expression:
+    eq_count = expression.count("=")
+    if eq_count > 1:
+        raise ValueError(
+            "Expression contains more than one '=' sign. "
+            "Please simplify to a single equation (e.g. 'lhs = rhs')."
+        )
+
+    if eq_count == 1:
         lhs_str, rhs_str = expression.split("=", 1)
         lhs = _parse(lhs_str.strip())
         rhs = _parse(rhs_str.strip())
@@ -179,16 +186,18 @@ def _op_solve(expression: str, variable: str | None) -> tuple[list[dict], str]:
     if not eq_expr.free_symbols:
         raise ValueError("No variables found — cannot solve a constant expression")
 
-    # Show factored form when it reveals the roots directly
+    # Show factored form when it reveals the roots directly.
+    # Use sympy.factor() directly rather than isinstance(Mul) so single-factor
+    # results (e.g. (x-3)**2) are also shown.
     factored = factor(eq_expr)
-    if factored != eq_expr and isinstance(factored, Mul):
+    if factored != eq_expr:
         steps.append({"expr": f"{_fmt(factored)} = 0", "rule": "factorise"})
 
     solutions = sympy.solve(eq_expr, var)
 
-    if not solutions:
-        steps.append({"expr": "no solution", "rule": f"solve for {var}"})
-        return steps, "No solution"
+    if solutions is None or len(solutions) == 0:
+        steps.append({"expr": "no real solution", "rule": f"solve for {var}"})
+        return steps, "No real solution"
 
     sol_strs = [f"{var} = {_fmt(s)}" for s in solutions]
     for s in sol_strs:

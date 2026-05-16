@@ -142,9 +142,32 @@ Set `VITE_USE_MOCK=true` to run fully in-browser without the backend.
 
 ```bash
 cd backend
-pytest
-pytest tests/test_socratic_constraints.py   # regression harness for Socratic rules
+.venv/bin/pytest                                        # fast suite (~121 tests, no LLM calls)
+.venv/bin/pytest tests/test_socratic_constraints.py     # Socratic discipline regression harness
+.venv/bin/pytest --run-slow -v                          # include live-LLM probe tests (costs tokens)
 ```
+
+### Probes
+
+The probe runner calls the LLM directly — no server needed. 12 probes cover Socratic constraints, schema compliance, and domain-specific rules (pseudocode-first, tool-before-answer, claim specificity).
+
+```bash
+cd backend
+python -m tests.run_probes                              # run all 12 probes
+python -m tests.run_probes --probe json_schema_compliance
+python -m tests.run_probes --model google/gemini-2.5-flash
+```
+
+### Log viewer
+
+`backend/scripts/view_logs.py` is a local web UI for browsing `backend/logs/llm.jsonl`. Every LLM call, classifier call, summarizer call, and chat turn lands in that file.
+
+```bash
+# requires flask (already in pyproject.toml)
+cd backend && .venv/bin/python scripts/view_logs.py logs/llm.jsonl
+```
+
+Open `http://127.0.0.1:5000`. Filter by session or event type, inspect thinking / reply / control / signal per turn, export selected entries as readable text or JSONL.
 
 ---
 

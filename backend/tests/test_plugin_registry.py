@@ -31,10 +31,10 @@ def test_get_prompt_concatenates_base_and_domain(loaded_registry):
     prompt = loaded_registry.get_prompt("math")
     # Socratic base contains a recognizable marker.
     assert "Socratic tutor" in prompt
-    # Math domain prompt has a known string.
-    assert "algebra tool" in prompt
+    # Math domain prompt has a known string (tool name declaration).
+    assert "symbolic algebra" in prompt
     # The base comes first.
-    assert prompt.index("Socratic tutor") < prompt.index("algebra tool")
+    assert prompt.index("Socratic tutor") < prompt.index("symbolic algebra")
 
 
 def test_get_prompt_unknown_domain_raises(loaded_registry):

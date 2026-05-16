@@ -13,15 +13,52 @@ validation (phase legality, hint clamping) happens after parse.
 
 from __future__ import annotations
 
+import datetime
+import json
 import logging
 import os
+import random
+import sys
 import uuid
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 _log = logging.getLogger("app.chat")
+
+
+# ---------------------------------------------------------------------------
+# Chat-turn JSONL logger (separate from llm.jsonl)
+# ---------------------------------------------------------------------------
+
+def _setup_chat_logger() -> logging.Logger:
+    logger = logging.getLogger("chat.turns")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    fmt = logging.Formatter("%(message)s")
+    logs_dir = Path(__file__).resolve().parent.parent / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    fh = logging.FileHandler(logs_dir / "chat.jsonl", encoding="utf-8")
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
+    return logger
+
+
+def _write_chat_log(entry: dict) -> None:
+    if os.environ.get("LOG_LLM_CALLS", "true").lower() in ("false", "0", "no"):
+        return
+    try:
+        _setup_chat_logger().debug(json.dumps(entry))
+        llm._write_log(entry)  # mirror into llm.jsonl so view_logs.py sees everything
+    except Exception:
+        pass
 
 from app import llm, persona as persona_mod, plugin_registry
 from app import session as session_mod
@@ -53,6 +90,32 @@ _VARIANT_BASE: str | None = os.environ.get("PROMPT_VARIANT_BASE")
 _VARIANT_DOMAIN_MAP: dict[str, str] = parse_domain_variants(
     os.environ.get("PROMPT_VARIANT_DOMAIN", "")
 )
+
+
+# ---- Reflection question banks ----------------------------------------------
+# Backend selects the question; the model emits only the trigger type.
+
+REFLECTION_QUESTIONS: dict[str, list[str]] = {
+    "periodic": [
+        "What was different about how you approached this part compared to the last one?",
+        "Is there anything about your thinking on that step that surprised you?",
+        "If you had to do that step again from scratch, what would you do differently?",
+    ],
+    "self_correction": [
+        "What made you change your mind just then?",
+        "How did you notice the mistake — what tipped you off?",
+        "What does catching that tell you about how you're thinking through this?",
+    ],
+    "escape_hatch": [
+        "Before I show you — in one sentence, where exactly did your thinking get stuck?",
+        "Just one sentence: what was the specific moment you felt you hit a wall?",
+    ],
+    "wrap_up": [
+        "Can you walk me through the full solution in your own words — start to finish?",
+        "If you were explaining this to a friend, what would you say was the key insight?",
+        "What would you tell someone who's about to tackle this same problem?",
+    ],
+}
 
 
 # ---- Request / response models ----------------------------------------------
@@ -91,20 +154,24 @@ class ChatRequest(BaseModel):
 
 
 class AgentControl(BaseModel):
-    """Loose mirror of the JSON schema in socratic_base.txt. Keeps nested
-    fields as raw dicts so prompt changes don't force a parser update."""
+    """Navigation fields the backend validates every turn.
+
+    Fields that moved to `signal` in the new schema are kept here with None
+    defaults for backward-compat during the migration. Handlers no longer read
+    them — they log a debug warning if non-None so we can confirm the model
+    stopped emitting them after the prompt change.
+    """
 
     phase: Phase | None = None
-    subproblem_updates: list[dict] = Field(default_factory=list)
     active_subproblem: str | None = None
-    hint_level: int = 0
+    hint_level: int | None = None  # null = no-op; integer = new escalation level
     tool_call: dict | None = None
     ui_directives: list[dict] = Field(default_factory=list)
-    reflection_prompt: dict | None = None
+    # --- deprecated fields (moved to signal) — kept for backward-compat only ---
+    subproblem_updates: list[dict] = Field(default_factory=list)
+    reflection_prompt: dict | None = None   # replaced by signal.emit_reflection
     last_reflection_quality: Literal["shallow", "decent", "deep"] | None = None
-    # Simple string field — backend auto-injects the CalibrationCheck widget.
-    # Avoids requiring the LLM to format a complex nested ui_directive object.
-    calibration_check: str | None = None
+    calibration_check: str | None = None    # replaced by signal.emit_calibration_check
     calibration_outcome: Literal["correct", "wrong", "partial"] | None = None
     persona_updates: list[dict] = Field(default_factory=list)
     self_correction_noted: bool = False
@@ -114,13 +181,35 @@ class AgentControl(BaseModel):
     persona: dict | None = None
 
 
+class AgentSignal(BaseModel):
+    """Optional session-event block. Absent entirely on quiet turns."""
+
+    subproblem_updates: list[dict] = Field(default_factory=list)
+    emit_reflection: Literal["periodic", "self_correction", "escape_hatch", "wrap_up"] | None = None
+    last_reflection_quality: Literal["shallow", "decent", "deep"] | None = None
+    emit_calibration_check: bool = False
+    calibration_outcome: Literal["correct", "wrong", "partial"] | None = None
+    persona_updates: list[dict] = Field(default_factory=list)
+    self_correction_noted: bool = False
+    escape_hatch_triggered: bool = False
+    escape_hatch_reflection: str | None = None
+    verification_prompted: bool = False
+    concepts_established: list[str] = Field(default_factory=list)
+    student_question_quality: Literal["surface", "probing", "insightful"] | None = None
+    decomposition_source: Literal["student", "tutor"] | None = None
+    disengagement_noted: bool = False
+    refined_query: str | None = None
+
+
 class AgentResponse(BaseModel):
-    reply: str
+    thinking: str | None = None   # scratchpad — stripped before any downstream use
+    reply: str | None = None      # null when tool_call is set
     control: AgentControl = Field(default_factory=AgentControl)
+    signal: AgentSignal | None = None
 
 
 class ChatResponse(BaseModel):
-    reply: str
+    reply: str | None
     phase: Phase
     domain: str
     subproblems: list[Subproblem]
@@ -168,10 +257,13 @@ def _validate_phase(session: Session, proposed: Phase | None) -> Phase:
     return proposed
 
 
-def _clamp_hint_level(session: Session, proposed: int) -> int:
-    """Clamp escalation to +1 over the active subproblem's current level."""
+def _clamp_hint_level(session: Session, proposed: int | None) -> int | None:
+    """Clamp escalation to +1 over the active subproblem's current level.
+    None means no hint this turn — pass through unchanged."""
+    if proposed is None:
+        return None
     if proposed <= 0:
-        return 0
+        return None  # treat non-positive as no-op same as null
     current = session.current_hint_level()
     return min(proposed, current + 1)
 
@@ -203,77 +295,127 @@ def _apply_subproblem_updates(session: Session, updates: list[dict]) -> None:
 
 
 def _apply_agent_response(session: Session, parsed: AgentResponse) -> None:
-    """Mutate the session in-place to reflect the agent's emitted control.
+    """Mutate the session in-place to reflect the agent's emitted control/signal.
     Phase must be validated and applied by the caller BEFORE this is called;
     this function skips the phase field intentionally to avoid overwriting the
     validated phase with the raw (potentially clamped) value."""
     control = parsed.control
+    signal = parsed.signal  # may be None on quiet turns
 
-    # Subproblems.
-    _apply_subproblem_updates(session, control.subproblem_updates)
+    # ---- control fields (navigation, always present) -------------------------
+
+    # Active subproblem activation (from control, still lives there).
     if control.active_subproblem is not None:
         session.active_subproblem_id = control.active_subproblem
-        # Mark that subproblem active, others not (best-effort: many specs only
-        # have one active at a time).
         for sp in session.subproblems:
             if sp.id == control.active_subproblem and sp.status == "pending":
                 sp.status = "active"
 
-    # Hint level: agent emits the new level; increment the active subproblem's
-    # hints_given counter.
-    if control.hint_level > 0:
+    # Hint level: null = no-op (do not overwrite).
+    if control.hint_level is not None:
         sp = session.active_subproblem()
         if sp is not None:
             sp.hints_given = control.hint_level
             session.metrics.hints_per_subproblem[sp.id] = sp.hints_given
 
-    # Reflection prompt: queue and remember the index so the next turn can
-    # attach the student's response.
-    if control.reflection_prompt:
-        rp = ReflectionPrompt(
-            trigger=control.reflection_prompt.get("trigger", "periodic"),
-            question=control.reflection_prompt.get("question", ""),
-        )
-        session.reflection_prompts.append(rp)
-        session.pending_reflection_index = len(session.reflection_prompts) - 1
+    # ---- signal fields (session events, optional block) ----------------------
 
-    # Reflection quality attaches to the *previous* reflection.
-    if control.last_reflection_quality and session.reflection_prompts:
-        idx = session.pending_reflection_index
-        # The student's response to that prompt arrives as a user message
-        # earlier in this turn; we stash it on the prompt entry. The prompt
-        # was answered, so clear pending.
-        if idx is not None and idx < len(session.reflection_prompts):
-            session.reflection_prompts[idx].quality = control.last_reflection_quality
-        session.pending_reflection_index = None
+    if signal is not None:
+        # Subproblem updates (moved from control to signal).
+        if signal.subproblem_updates:
+            _apply_subproblem_updates(session, signal.subproblem_updates)
+            # Warn if any subproblem closed without verification being prompted.
+            for upd in signal.subproblem_updates:
+                if upd.get("status") == "solved":
+                    sp_id = upd.get("id")
+                    if sp_id and sp_id not in session.verification_prompted_subproblems:
+                        _log.warning(
+                            "session=%s subproblem %r closed as solved without "
+                            "verification_prompted being set this session",
+                            session.session_id[:8], sp_id,
+                        )
 
-    # Calibration outcome attaches to the most recent unresolved calibration
-    # point for the active subproblem.
-    if control.calibration_outcome and session.active_subproblem_id:
-        for cp in reversed(session.calibration_points):
-            if cp.subproblem_id == session.active_subproblem_id and cp.outcome is None:
-                cp.outcome = control.calibration_outcome
-                break
+        # Verification prompted — record against active subproblem.
+        if signal.verification_prompted and session.active_subproblem_id:
+            if session.active_subproblem_id not in session.verification_prompted_subproblems:
+                session.verification_prompted_subproblems.append(session.active_subproblem_id)
 
-    # Persona updates — delegated to persona module (idempotent if user is
-    # in the persona-onboarding session, since persona isn't on disk yet).
-    if control.persona_updates:
-        persona_mod.merge_persona_updates(session.username, control.persona_updates)
+        # Reflection trigger — queue and remember index for next-turn quality attach.
+        emit_trigger = signal.emit_reflection
+        if emit_trigger:
+            question = random.choice(
+                REFLECTION_QUESTIONS.get(emit_trigger, REFLECTION_QUESTIONS["periodic"])
+            )
+            rp = ReflectionPrompt(trigger=emit_trigger, question=question)
+            session.reflection_prompts.append(rp)
+            session.pending_reflection_index = len(session.reflection_prompts) - 1
 
-    # Self-correction metric.
-    if control.self_correction_noted:
-        session.metrics.self_corrections += 1
+        # Reflection quality attaches to the previous pending reflection.
+        if signal.last_reflection_quality and session.reflection_prompts:
+            idx = session.pending_reflection_index
+            if idx is not None and idx < len(session.reflection_prompts):
+                session.reflection_prompts[idx].quality = signal.last_reflection_quality
+            else:
+                # Quality arrived without a pending index (e.g. agent evaluated two turns late).
+                # Walk back to attach to the most recent un-evaluated reflection.
+                for rp in reversed(session.reflection_prompts):
+                    if rp.quality is None:
+                        rp.quality = signal.last_reflection_quality
+                        break
+                else:
+                    _log.warning(
+                        "last_reflection_quality=%r arrived but no pending reflection found; discarded",
+                        signal.last_reflection_quality,
+                    )
+            session.pending_reflection_index = None
 
-    # Escape hatch reflection attaches to the active subproblem.
-    if control.escape_hatch_triggered:
-        sp = session.active_subproblem()
-        if sp is not None:
-            sp.direct_answer_requested = True
-            if control.escape_hatch_reflection:
-                sp.escape_hatch_reflection = control.escape_hatch_reflection
-        session.metrics.direct_answer_requests += 1
+        # Calibration outcome attaches to the most recent open calibration point.
+        if signal.calibration_outcome and session.active_subproblem_id:
+            for cp in reversed(session.calibration_points):
+                if cp.subproblem_id == session.active_subproblem_id and cp.outcome is None:
+                    cp.outcome = signal.calibration_outcome
+                    break
 
-    # Phase-counter metrics.
+        # Persona updates.
+        if signal.persona_updates:
+            persona_mod.merge_persona_updates(session.username, signal.persona_updates)
+
+        # Self-correction.
+        if signal.self_correction_noted:
+            session.metrics.self_corrections += 1
+
+        # Escape hatch.
+        if signal.escape_hatch_triggered:
+            sp = session.active_subproblem()
+            if sp is not None:
+                sp.direct_answer_requested = True
+                if signal.escape_hatch_reflection:
+                    sp.escape_hatch_reflection = signal.escape_hatch_reflection
+            session.metrics.direct_answer_requests += 1
+
+        # Concepts established — extend session list (prevents re-asking).
+        if signal.concepts_established:
+            for concept in signal.concepts_established:
+                if concept not in session.concepts_established:
+                    session.concepts_established.append(concept)
+
+        # Student question quality — per-turn analytics.
+        if signal.student_question_quality:
+            session.student_questions.append({"quality": signal.student_question_quality})
+
+        # Decomposition source — record first assignment only.
+        if signal.decomposition_source and session.decomposition_source is None:
+            session.decomposition_source = signal.decomposition_source
+
+        # Disengagement counter.
+        if signal.disengagement_noted:
+            session.disengagement_count += 1
+
+        # Refined query — overwrite on each set (latest clarification wins).
+        if signal.refined_query:
+            session.refined_query = signal.refined_query
+
+    # ---- Phase-counter metrics (always) --------------------------------------
     session.metrics.turns_total += 1
     if session.phase == "clarification":
         session.metrics.clarification_turns += 1
@@ -291,29 +433,50 @@ def _build_chat_response(
 ) -> ChatResponse:
     directives = list(parsed.control.ui_directives)
 
-    # Auto-inject ReflectionPrompt widget when control.reflection_prompt is set,
-    # unless the agent already emitted one (dedup by component name).
-    rp = parsed.control.reflection_prompt
-    if rp and not any(d.get("component") == "ReflectionPrompt" for d in directives):
+    # Auto-inject ReflectionPrompt widget when signal.emit_reflection is set.
+    # Question is selected from the backend bank — not generated by the model.
+    if parsed.control.reflection_prompt:
+        _log.debug(
+            "deprecated: control.reflection_prompt is set (%r) — "
+            "model should emit signal.emit_reflection instead",
+            parsed.control.reflection_prompt,
+        )
+    emit_trigger = parsed.signal.emit_reflection if parsed.signal else None
+    if emit_trigger and not any(d.get("component") == "ReflectionPrompt" for d in directives):
+        # Reuse the question already chosen and stored in _apply_agent_response so
+        # the directive and the session record are consistent.
+        idx = session.pending_reflection_index
+        if idx is not None and 0 <= idx < len(session.reflection_prompts):
+            question = session.reflection_prompts[idx].question
+        else:
+            question = random.choice(REFLECTION_QUESTIONS.get(emit_trigger, REFLECTION_QUESTIONS["periodic"]))
         directives.append({
             "component": "ReflectionPrompt",
             "domain": "general",
             "props": {
-                "question": rp.get("question", ""),
-                "trigger": rp.get("trigger", "periodic"),
+                "question": question,
+                "trigger": emit_trigger,
             },
             "placement": "inline",
             "lifetime": "until_next_turn",
         })
 
-    # Auto-inject CalibrationCheck widget when control.calibration_check is set,
-    # unless the agent already emitted one.
-    cc = parsed.control.calibration_check
+    # Auto-inject CalibrationCheck widget when signal.emit_calibration_check is true.
+    # Widget question is backend-defined (not model-generated).
+    if parsed.control.calibration_check:
+        _log.debug(
+            "session deprecated: control.calibration_check is set (%r) — "
+            "model should emit signal.emit_calibration_check instead",
+            parsed.control.calibration_check,
+        )
+    cc = parsed.signal is not None and parsed.signal.emit_calibration_check
     if cc and not any(d.get("component") == "CalibrationCheck" for d in directives):
         directives.append({
             "component": "CalibrationCheck",
             "domain": "general",
-            "props": {"question": cc},
+            "props": {
+                "question": "Before you try — how confident are you that you'll get this right? 1 to 5.",
+            },
             "placement": "inline",
             "lifetime": "until_next_turn",
         })
@@ -362,6 +525,8 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
             usage["completion_tokens"],
             session.metrics.token_usage.total_tokens,
         )
+        # Strip `thinking` before parsing — it must never reach the frontend.
+        raw.pop("thinking", None)
         try:
             parsed = AgentResponse.model_validate(raw)
             llm.mark_parse_result(session.session_id, True)
@@ -371,6 +536,47 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
                 status_code=502,
                 detail=f"Agent output failed schema validation: {e}",
             ) from e
+        parsed.thinking = None  # belt-and-suspenders: ensure field is never forwarded
+
+        # Enforce tool_call / reply mutual exclusion.
+        # If the agent wrote a multi-sentence reply alongside a tool_call, the
+        # student would see the answer before interpreting tool output — defeats
+        # constraint 4. Retry once with a corrective note.
+        if parsed.control.tool_call is not None and parsed.reply:
+            word_count = len(parsed.reply.split())
+            # Count sentence-ending punctuation as a proxy for multiple sentences.
+            sentence_count = sum(parsed.reply.count(p) for p in ".?!")
+            if word_count > 30 or sentence_count > 1:
+                _log.warning(
+                    "session=%s tool_call set but reply is too long (%d words, %d sentences) — retrying",
+                    session.session_id[:8], word_count, sentence_count,
+                )
+                correction_messages = messages + [
+                    {"role": "assistant", "content": str(raw)},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You emitted tool_call with a multi-sentence reply. "
+                            "When tool_call is set, reply must be null or one short "
+                            "framing sentence only (≤30 words). Rewrite."
+                        ),
+                    },
+                ]
+                raw2, usage2 = await llm.call_tutor(
+                    correction_messages,
+                    session_id=session.session_id,
+                    temperature=_TUTOR_TEMP,
+                )
+                session.metrics.token_usage.add(usage2)
+                raw2.pop("thinking", None)
+                try:
+                    parsed = AgentResponse.model_validate(raw2)
+                    parsed.thinking = None
+                except Exception:
+                    _log.warning(
+                        "session=%s tool_call/reply retry failed to parse — using original",
+                        session.session_id[:8],
+                    )
 
         if parsed.control.tool_call is None:
             return parsed, None, last_backend_tool_result
@@ -415,13 +621,15 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
 
         last_tool_name = tool_name
         last_backend_tool_result = dispatch
+        display_data = dispatch.get("display_data", {})
         tool_msg = {
             "role": "user",
             "content": (
-                f"[SYSTEM] Tool '{tool_name}' result: {dispatch.get('result')!r}. "
-                f"The output is shown to the student. "
-                f"Reply to the student now. Do not call any tool. "
-                f"Set tool_call to null."
+                f"[SYSTEM] Tool '{tool_name}' result:\n"
+                f"  answer: {dispatch.get('result')!r}\n"
+                f"  display (shown to student): {json.dumps(display_data)}\n"
+                f"Reply to the student now. Ask them to interpret this output. "
+                f"Do not call any tool. Set tool_call to null."
             ),
         }
         messages.append(tool_msg)
@@ -481,7 +689,7 @@ async def session_new(req: SessionNewRequest) -> SessionNewResponse:
     parsed, _, _ = await _run_chat_turn(session)
     session.phase = _validate_phase(session, parsed.control.phase)
     _apply_agent_response(session, parsed)
-    session.message_history.append({"role": "assistant", "content": parsed.reply})
+    session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
     session_mod.put(session)
 
     return SessionNewResponse(
@@ -563,7 +771,11 @@ async def chat(req: ChatRequest) -> ChatResponse:
     parsed, frontend_tool, backend_tool_result = await _run_chat_turn(session)
     # Phase guard: if the agent is asking for a calibration prediction this turn,
     # don't let it also transition to wrap_up — the student hasn't answered yet.
-    if parsed.control.calibration_check and parsed.control.phase == "wrap_up":
+    calibration_requested = (
+        (parsed.signal is not None and parsed.signal.emit_calibration_check)
+        or bool(parsed.control.calibration_check)  # deprecated path
+    )
+    if calibration_requested and parsed.control.phase == "wrap_up":
         _log.warning(
             "session=%s blocked wrap_up phase transition on same turn as calibration_check",
             req.session_id[:8],
@@ -572,7 +784,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     session.phase = _validate_phase(session, parsed.control.phase)
     parsed.control.hint_level = _clamp_hint_level(session, parsed.control.hint_level)
     _apply_agent_response(session, parsed)
-    session.message_history.append({"role": "assistant", "content": parsed.reply})
+    session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
 
     onboarding_complete = False
     if (
@@ -580,9 +792,29 @@ async def chat(req: ChatRequest) -> ChatResponse:
         and session.phase == "wrap_up"
         and parsed.control.persona
     ):
-        persona_mod.handle_persona_wrap_up(session.username, parsed.control.persona)
+        persona_mod.handle_persona_wrap_up(
+            session.username, parsed.control.persona, session_id=session.session_id
+        )
         onboarding_complete = True
 
+    _write_chat_log({
+        "event": "chat_turn",
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "session_id": req.session_id,
+        "turn": session.metrics.turns_total,
+        "phase": session.phase,
+        "active_subproblem": session.active_subproblem_id,
+        "hint_level": session.current_hint_level(),
+        "input_kind": (
+            "message" if req.message is not None
+            else "directive_response" if req.directive_response is not None
+            else "tool_result"
+        ),
+        "user_message": req.message,
+        "agent_reply_preview": (parsed.reply or "")[:120],
+        "tool_called": (parsed.control.tool_call.get("name") if isinstance(parsed.control.tool_call, dict) else None),
+        "phase_after": session.phase,
+    })
     session_mod.put(session)
     return _build_chat_response(
         session,
@@ -626,10 +858,8 @@ async def tools_dispatch(tool_name: str, req: ToolDispatchRequest) -> dict:
 async def thinking_trace(session_id: str) -> dict:
     """Compute the session's thinking trace.
 
-    v1 is mechanical: counts, phase breakdown, subproblems, reflection
-    summary, calibration points. The understanding-delta LLM call (label +
-    one-sentence evidence) is deferred to a follow-up; left as null for
-    now."""
+    Fires a cheap LLM call to synthesise final_understanding and the
+    understanding delta from the student's recent messages."""
     session = session_mod.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Unknown session_id {session_id!r}")
@@ -639,6 +869,19 @@ async def thinking_trace(session_id: str) -> dict:
     for r in reflections:
         if r.quality in quality_count:
             quality_count[r.quality] += 1
+
+    # Extract recent student messages for the summariser.
+    recent_student = [
+        m["content"]
+        for m in session.message_history
+        if m.get("role") == "user" and not m["content"].startswith("[SYSTEM]")
+    ]
+
+    summary = await llm.call_summarizer(
+        initial_understanding=session.initial_understanding,
+        recent_student_messages=recent_student,
+        session_id=session_id,
+    )
 
     return {
         "mode": session.mode,
@@ -656,6 +899,15 @@ async def thinking_trace(session_id: str) -> dict:
         },
         "subproblems": [sp.model_dump() for sp in session.subproblems],
         "calibration_points": [cp.model_dump() for cp in session.calibration_points],
+        "reflection_prompts": [
+            {
+                "trigger": r.trigger,
+                "question": r.question,
+                "response": r.response,
+                "quality": r.quality,
+            }
+            for r in reflections
+        ],
         "reflection_summary": {
             "deep_reflections": quality_count["deep"],
             "decent_reflections": quality_count["decent"],
@@ -669,10 +921,13 @@ async def thinking_trace(session_id: str) -> dict:
         "direct_answers_requested": session.metrics.direct_answer_requests,
         "self_corrections": session.metrics.self_corrections,
         "initial_understanding": session.initial_understanding,
-        # Final-understanding extraction + delta labelling deferred to follow-up.
-        "final_understanding": None,
-        "understanding_delta_label": None,
-        "understanding_delta_evidence": None,
+        "refined_query": session.refined_query,
+        "concepts_established": session.concepts_established,
+        "decomposition_source": session.decomposition_source,
+        "disengagement_count": session.disengagement_count,
+        "final_understanding": summary["final_understanding"],
+        "understanding_delta_label": summary["delta_label"],
+        "understanding_delta_evidence": summary["delta_evidence"],
     }
 
 

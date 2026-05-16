@@ -193,6 +193,13 @@ class Session(BaseModel):
     # Last frontend tool_call surfaced to the client, awaiting tool_result on
     # the next /chat call.
     pending_frontend_tool: dict | None = None
+    # Signal-derived session state (new schema).
+    concepts_established: list[str] = Field(default_factory=list)
+    student_questions: list[dict] = Field(default_factory=list)
+    decomposition_source: Literal["student", "tutor"] | None = None
+    disengagement_count: int = 0
+    refined_query: str | None = None
+    verification_prompted_subproblems: list[str] = Field(default_factory=list)
 
     def active_subproblem(self) -> Subproblem | None:
         if self.active_subproblem_id is None:
@@ -220,10 +227,21 @@ class Session(BaseModel):
             "active_subproblem": self.active_subproblem_id,
             "current_hint_level": self.current_hint_level(),
             "subproblems": [
-                {"id": s.id, "description": s.description, "status": s.status}
+                {
+                    "id": s.id,
+                    "description": s.description,
+                    "goal": s.goal,
+                    "status": s.status,
+                    "hints_given": s.hints_given,
+                    "direct_answer_requested": s.direct_answer_requested,
+                }
                 for s in self.subproblems
             ],
+            "self_corrections": self.metrics.self_corrections,
+            "turns_total": self.metrics.turns_total,
             "initial_understanding": self.initial_understanding,
+            "refined_query": self.refined_query,
+            "concepts_established": self.concepts_established,
         }
         if self.mode == "critique":
             payload["initial_critique"] = self.initial_critique
