@@ -31,13 +31,13 @@ export default function ToolPane({
           const Component = lookup(`${domain}.${tool.ui_component}`);
           if (!Component) {
             return (
-              <div key={i} className="text-caption text-ink-faint p-2">
+              <div key={`t-${i}`} className="text-caption text-ink-faint p-2">
                 Unknown component: {tool.ui_component}
               </div>
             );
           }
           return (
-            <div key={i} className="rounded-md border border-rule bg-paper p-3">
+            <div key={`t-${i}`} className="rounded-md border border-rule bg-paper p-3">
               <Component {...(tool.display_data ?? {})} />
             </div>
           );
@@ -47,13 +47,13 @@ export default function ToolPane({
           const Component = lookup(`${d.domain}.${d.component}`);
           if (!Component) {
             return (
-              <div key={i} className="text-caption text-ink-faint p-2">
+              <div key={`d-${i}`} className="text-caption text-ink-faint p-2">
                 Unknown: {d.component}
               </div>
             );
           }
           return (
-            <div key={i} className="rounded-md border border-rule bg-paper p-3">
+            <div key={`d-${i}`} className="rounded-md border border-rule bg-paper p-3">
               <Component
                 {...d.props}
                 onSelect={(value: unknown) =>

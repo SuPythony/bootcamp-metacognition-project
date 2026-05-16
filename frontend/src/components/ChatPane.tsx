@@ -74,9 +74,17 @@ export default function ChatPane({
   const disabled = isLoading || inputDisabled === true;
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Auto-scroll only if user is already near the bottom. Otherwise they're
+  // scrolled up reading an earlier turn — yanking them back is disorienting.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 120) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages, isLoading]);
 
   function handleSend() {
@@ -88,7 +96,7 @@ export default function ChatPane({
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
         {messages.map((msg, i) => (
           <div key={i} className="space-y-3">
             {msg.role === "user" ? (

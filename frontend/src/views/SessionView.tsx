@@ -21,6 +21,20 @@ export const INTERACTIVE_DIRECTIVES = new Set([
   "RuleRecallPrompt",
 ]);
 
+// Pure helper: merge new side-panel directives into an existing list,
+// dropping duplicates of (component, props). Prevents the panel from growing
+// unbounded when the agent re-emits the same directive every turn.
+export function mergeSidePanelDirectives(
+  prev: UIDirective[],
+  incoming: UIDirective[],
+): UIDirective[] {
+  if (incoming.length === 0) return prev;
+  const key = (d: UIDirective) => `${d.component}::${JSON.stringify(d.props)}`;
+  const seen = new Set(prev.map(key));
+  const fresh = incoming.filter((d) => !seen.has(key(d)));
+  return fresh.length === 0 ? prev : [...prev, ...fresh];
+}
+
 // Pure helper: returns true if the last assistant message has an interactive
 // inline directive whose component is actually registered. Unknown components
 // and display-only directives must not lock the input.
@@ -65,6 +79,10 @@ export default function SessionView({
   const [isLoading, setIsLoading] = useState(false);
   const [problemOpen, setProblemOpen] = useState(false);
   const problemBtnRef = useRef<HTMLButtonElement | null>(null);
+  // Synchronous lock — isLoading state updates asynchronously, so rapid Enter
+  // presses or directive clicks could otherwise double-fire before the disabled
+  // state takes effect. A ref flips immediately and is checked at entry.
+  const inFlightRef = useRef(false);
 
   async function send(message?: string, directiveResponse?: { component: string; value: unknown }) {
     setIsLoading(true);
@@ -102,8 +120,11 @@ export default function SessionView({
 
       if (res.subproblems?.length > 0) setSubproblems(res.subproblems);
       if (res.phase) setPhase(res.phase);
-      if (sidePanelNew.length > 0)
-        setSidePanelDirectives((prev) => [...prev, ...sidePanelNew]);
+      if (sidePanelNew.length > 0) {
+        setSidePanelDirectives((prev) =>
+          mergeSidePanelDirectives(prev, sidePanelNew),
+        );
+      }
       if (res.tool_calls?.length > 0) setToolResults(res.tool_calls);
       if (modalNew.length > 0) setModalDirective(modalNew[0]);
 
@@ -122,10 +143,13 @@ export default function SessionView({
       ]);
     } finally {
       setIsLoading(false);
+      inFlightRef.current = false;
     }
   }
 
   function handleSend(text: string) {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     send(text);
   }
@@ -146,7 +170,13 @@ export default function SessionView({
   }
 
   function handleDirectiveResponse(component: string, value: unknown) {
-    setModalDirective(null);
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    // Only close the modal if the response IS for the modal directive.
+    // Answering an unrelated inline widget should not dismiss an open modal.
+    if (modalDirective && modalDirective.component === component) {
+      setModalDirective(null);
+    }
     const text = formatDirectiveValue(component, value);
     setMessages((prev) => {
       const cleared = prev.map((m, i) =>
@@ -212,7 +242,7 @@ export default function SessionView({
             </span>
           </div>
           <div className="flex-1 flex justify-center min-w-0">
-            <PhaseStepper phase={phase} />
+            {domain !== "persona" && <PhaseStepper phase={phase} />}
           </div>
           <div className="flex items-center gap-2 shrink-0 relative">
             {originalQuery && (
