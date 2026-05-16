@@ -13,6 +13,7 @@ validation (phase legality, hint clamping) happens after parse.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -573,13 +574,15 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
 
         last_tool_name = tool_name
         last_backend_tool_result = dispatch
+        display_data = dispatch.get("display_data", {})
         tool_msg = {
             "role": "user",
             "content": (
-                f"[SYSTEM] Tool '{tool_name}' result: {dispatch.get('result')!r}. "
-                f"The output is shown to the student. "
-                f"Reply to the student now. Do not call any tool. "
-                f"Set tool_call to null."
+                f"[SYSTEM] Tool '{tool_name}' result:\n"
+                f"  answer: {dispatch.get('result')!r}\n"
+                f"  display (shown to student): {json.dumps(display_data)}\n"
+                f"Reply to the student now. Ask them to interpret this output. "
+                f"Do not call any tool. Set tool_call to null."
             ),
         }
         messages.append(tool_msg)
@@ -788,10 +791,8 @@ async def tools_dispatch(tool_name: str, req: ToolDispatchRequest) -> dict:
 async def thinking_trace(session_id: str) -> dict:
     """Compute the session's thinking trace.
 
-    v1 is mechanical: counts, phase breakdown, subproblems, reflection
-    summary, calibration points. The understanding-delta LLM call (label +
-    one-sentence evidence) is deferred to a follow-up; left as null for
-    now."""
+    Fires a cheap LLM call to synthesise final_understanding and the
+    understanding delta from the student's recent messages."""
     session = session_mod.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Unknown session_id {session_id!r}")
@@ -801,6 +802,19 @@ async def thinking_trace(session_id: str) -> dict:
     for r in reflections:
         if r.quality in quality_count:
             quality_count[r.quality] += 1
+
+    # Extract recent student messages for the summariser.
+    recent_student = [
+        m["content"]
+        for m in session.message_history
+        if m.get("role") == "user" and not m["content"].startswith("[SYSTEM]")
+    ]
+
+    summary = await llm.call_summarizer(
+        initial_understanding=session.initial_understanding,
+        recent_student_messages=recent_student,
+        session_id=session_id,
+    )
 
     return {
         "mode": session.mode,
@@ -818,6 +832,15 @@ async def thinking_trace(session_id: str) -> dict:
         },
         "subproblems": [sp.model_dump() for sp in session.subproblems],
         "calibration_points": [cp.model_dump() for cp in session.calibration_points],
+        "reflection_prompts": [
+            {
+                "trigger": r.trigger,
+                "question": r.question,
+                "response": r.response,
+                "quality": r.quality,
+            }
+            for r in reflections
+        ],
         "reflection_summary": {
             "deep_reflections": quality_count["deep"],
             "decent_reflections": quality_count["decent"],
@@ -835,10 +858,9 @@ async def thinking_trace(session_id: str) -> dict:
         "concepts_established": session.concepts_established,
         "decomposition_source": session.decomposition_source,
         "disengagement_count": session.disengagement_count,
-        # Final-understanding extraction + delta labelling deferred to follow-up.
-        "final_understanding": None,
-        "understanding_delta_label": None,
-        "understanding_delta_evidence": None,
+        "final_understanding": summary["final_understanding"],
+        "understanding_delta_label": summary["delta_label"],
+        "understanding_delta_evidence": summary["delta_evidence"],
     }
 
 

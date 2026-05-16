@@ -368,6 +368,57 @@ async def call_classifier(query: str, temperature: float | None = None) -> tuple
     return parsed, usage
 
 
+async def call_summarizer(
+    initial_understanding: str | None,
+    recent_student_messages: list[str],
+    temperature: float = 0.3,
+    session_id: str = "summarizer",
+) -> dict:
+    """Generate final_understanding + delta label for the thinking trace.
+
+    Returns a dict with keys: final_understanding (str), delta_label (str),
+    delta_evidence (str). On any failure, returns safe fallback strings.
+    """
+    model = _env("LLM_MODEL_CLASSIFIER")  # cheap model is fine for this task
+    student_block = "\n".join(f"- {m}" for m in recent_student_messages[-4:]) or "(none)"
+    initial_block = initial_understanding or "(not captured)"
+    system = (
+        "You are a concise summariser for an educational thinking trace. "
+        "Respond with exactly one JSON object — no prose, no markdown — with these keys:\n"
+        '  "final_understanding": one sentence describing the student\'s current understanding based on their recent messages,\n'
+        '  "delta_label": exactly one of "significant", "moderate", "small" — how much their understanding grew,\n'
+        '  "delta_evidence": one sentence of concrete evidence for the delta label.\n'
+        "Base your answer only on the provided messages."
+    )
+    user = (
+        f"Initial understanding: {initial_block}\n\n"
+        f"Recent student messages (most recent last):\n{student_block}"
+    )
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    try:
+        response = await _post_chat(
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=temperature,
+        )
+        usage = _extract_usage(response)
+        content = _strip_fences(_extract_content(response))
+        parsed = json.loads(content)
+        return {
+            "final_understanding": str(parsed.get("final_understanding", "")),
+            "delta_label": str(parsed.get("delta_label", "small")),
+            "delta_evidence": str(parsed.get("delta_evidence", "")),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("app.llm").warning("call_summarizer failed: %s", exc)
+        return {
+            "final_understanding": None,
+            "delta_label": None,
+            "delta_evidence": None,
+        }
+
+
 async def stream_tutor(
     messages: list[dict],
     schema: dict | None = None,
