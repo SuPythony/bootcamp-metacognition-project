@@ -223,9 +223,11 @@ async def persona_create(req: PersonaCreateRequest) -> PersonaCreateResponse:
         domain="persona",
         original_query="(onboarding)",
         message_history=[
-            # The agent leads the persona interview, so we seed a user-side
-            # "hi" so the LLM call doesn't start from a system-only prompt.
-            {"role": "user", "content": "Hi, I just opened the app."},
+            # Seed with an unambiguous trigger. The model must not count this
+            # as an answer to either onboarding question — the persona prompt
+            # makes that explicit. Using a bracketed tag instead of prose
+            # reduces the chance the model treats it as Turn 1 content.
+            {"role": "user", "content": "[onboarding start — ask Turn 1 only]"},
         ],
     )
     session_mod.put(session)

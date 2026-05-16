@@ -35,12 +35,12 @@ function BreathingDots() {
   );
 }
 
-function AssistantMessage({ children }: { children: string }) {
+function AssistantMessage({ children, showDots }: { children: string; showDots?: boolean }) {
   return (
     <div className="pl-4 border-l-2 border-rule space-y-1.5">
       <p className="text-label text-ink-faint">Tutor</p>
       <div className="text-body text-ink leading-relaxed">
-        <MathText>{children}</MathText>
+        {showDots ? <BreathingDots /> : <MathText>{children}</MathText>}
       </div>
     </div>
   );
@@ -72,6 +72,11 @@ export default function ChatPane({
   domain?: Domain;
 }) {
   const disabled = isLoading || inputDisabled === true;
+  const lastMsgIdx = messages.length - 1;
+  const showDotStub =
+    isLoading &&
+    messages[lastMsgIdx]?.role === "assistant" &&
+    messages[lastMsgIdx]?.content === "";
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -94,7 +99,9 @@ export default function ChatPane({
             {msg.role === "user" ? (
               <UserMessage>{msg.content}</UserMessage>
             ) : (
-              <AssistantMessage>{msg.content}</AssistantMessage>
+              <AssistantMessage showDots={showDotStub && i === lastMsgIdx}>
+                {msg.content}
+              </AssistantMessage>
             )}
 
             {msg.role === "assistant" &&
@@ -119,7 +126,7 @@ export default function ChatPane({
           </div>
         ))}
 
-        {isLoading && (
+        {isLoading && messages[lastMsgIdx]?.role !== "assistant" && (
           <div className="pl-4 border-l-2 border-rule space-y-1.5">
             <p className="text-label text-ink-faint">Tutor</p>
             <BreathingDots />
