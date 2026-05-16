@@ -34,8 +34,8 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from app import llm  # noqa: E402
-from app.prompts.variants import load_combined, parse_domain_variants  # noqa: E402
-from tests.probes import PROBES, _run_assertions  # noqa: E402
+from app.prompts.variants import parse_domain_variants  # noqa: E402
+from tests.probes import PROBES, _run_assertions, _load_probe_prompt  # noqa: E402
 
 
 def _logs_dir() -> Path:
@@ -64,9 +64,12 @@ def _rebuild_probe_messages(
     """
     domain_map = parse_domain_variants(domain_variant_arg or "")
     domain_variant = domain_map.get(probe["domain"])
+    phase = probe.get("phase", "clarification")
     messages = list(probe["messages"])
     messages[0] = dict(messages[0])
-    messages[0]["content"] = load_combined(probe["domain"], base_variant, domain_variant)
+    messages[0]["content"] = _load_probe_prompt(
+        probe["domain"], phase, base_variant, domain_variant
+    )
     return messages
 
 

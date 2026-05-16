@@ -22,16 +22,46 @@ _BACKEND = Path(__file__).resolve().parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from app.prompts.variants import load_combined  # noqa: E402
+from app.prompts.variants import load_base_prompt, load_prompt  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Phase-aware prompt loader for probes
+# ---------------------------------------------------------------------------
+
+def _load_probe_prompt(
+    domain: str,
+    phase: str = "clarification",
+    base_variant: str | None = None,
+    domain_variant: str | None = None,
+) -> str:
+    """Load core.txt + phase_{phase}.txt + domain prompt for probe use.
+
+    No real Session needed — passes a minimal stub with just the phase set.
+    Calibration and reflection fields are empty so no context blocks are added.
+    """
+    class _PhaseStub:
+        def __init__(self, p: str) -> None:
+            self.phase = p
+            self.calibration_points: list = []
+            self.pending_reflection_index = None
+            self.reflection_prompts: list = []
+
+    base = load_base_prompt(variant_key=base_variant, session=_PhaseStub(phase))
+    domain_text = load_prompt(domain, variant_key=domain_variant)
+    return base + "\n\n" + domain_text
+
 
 # ---------------------------------------------------------------------------
 # Load real prompt content from disk via the variant registry
 # ---------------------------------------------------------------------------
 
-_MATH_PROMPT    = load_combined("math")
-_PROG_PROMPT    = load_combined("programming")
-_ESSAY_PROMPT   = load_combined("essay")
-_GENERAL_PROMPT = load_combined("general")
+_MATH_CLARIFICATION_PROMPT    = _load_probe_prompt("math",        "clarification")
+_MATH_SOLVING_PROMPT          = _load_probe_prompt("math",        "solving")
+_PROG_CLARIFICATION_PROMPT    = _load_probe_prompt("programming", "clarification")
+_ESSAY_CLARIFICATION_PROMPT   = _load_probe_prompt("essay",       "clarification")
+_ESSAY_SOLVING_PROMPT         = _load_probe_prompt("essay",       "solving")
+_GENERAL_CLARIFICATION_PROMPT = _load_probe_prompt("general",     "clarification")
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +234,58 @@ def _run_assertions(raw_output: str, probe: dict) -> None:
                     f"Reply accepted a broad claim without pushing for specificity ({pat.pattern!r}):\n{reply!r}"
                 )
 
+    # 11. control.hint_level must be null or 0 (no escalation on confused question).
+    if probe.get("assert_hint_level_null_or_zero") and parsed is not None:
+        hint_level = (parsed.get("control") or {}).get("hint_level")
+        if hint_level is not None and hint_level != 0:
+            raise AssertionError(
+                f"control.hint_level is {hint_level!r}; expected null or 0 "
+                "(confused question is not a failed attempt — do not escalate)"
+            )
+
+    # 12. Reply must contain at least one of the listed strings (case-insensitive).
+    if probe.get("assert_reply_contains_any"):
+        required = probe["assert_reply_contains_any"]
+        if not any(s.lower() in reply.lower() for s in required):
+            raise AssertionError(
+                f"Reply contains none of the required strings {required!r}:\n{reply!r}"
+            )
+
+    # 13. Reply must not contain direct confirmation phrases.
+    if probe.get("assert_no_direct_confirmation"):
+        _CONFIRM_PATS = [
+            re.compile(r"\bcorrect\b", re.IGNORECASE),
+            re.compile(r"\bexactly right\b", re.IGNORECASE),
+            re.compile(r"\bthat'?s right\b", re.IGNORECASE),
+            re.compile(r"\bwell done\b", re.IGNORECASE),
+            re.compile(r"\byou'?ve got it\b", re.IGNORECASE),
+            re.compile(r"\byes,?\s+that'?s\b", re.IGNORECASE),
+        ]
+        for pat in _CONFIRM_PATS:
+            if pat.search(reply):
+                raise AssertionError(
+                    f"Reply contains direct confirmation ({pat.pattern!r}) — "
+                    f"agent must not confirm answer directly:\n{reply!r}"
+                )
+
+    # 14. thinking field must be non-empty.
+    if probe.get("assert_thinking_non_empty") and parsed is not None:
+        thinking = (parsed.get("thinking") or "").strip()
+        if not thinking:
+            raise AssertionError(
+                "thinking field is empty or absent — "
+                "clarification phase requires internal reasoning in thinking"
+            )
+
+    # 15. control.tool_call must be non-null.
+    if probe.get("assert_tool_call_set") and parsed is not None:
+        tool_call = (parsed.get("control") or {}).get("tool_call")
+        if tool_call is None:
+            raise AssertionError(
+                "control.tool_call is null — "
+                "agent should invoke a tool rather than replying inline"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Probe definitions
@@ -211,11 +293,14 @@ def _run_assertions(raw_output: str, probe: dict) -> None:
 
 # Shared session context injected as a system message to give the model a
 # minimal but valid session state (same shape as session.to_context_str()).
+# hint_level is None (null in JSON) for fresh sessions — 0 is not a valid
+# "no hint yet" signal in the new schema.
+
 _SESSION_CTX_MATH = json.dumps({
     "phase": "clarification",
     "domain": "math",
     "active_subproblem": None,
-    "hint_level": 0,
+    "hint_level": None,
     "original_query": "Solve 2x + 3 = 7",
 })
 
@@ -227,11 +312,19 @@ _SESSION_CTX_SOLVING_MATH = json.dumps({
     "original_query": "Solve 2x + 3 = 7",
 })
 
+_SESSION_CTX_SOLVING_FRESH = json.dumps({
+    "phase": "solving",
+    "domain": "math",
+    "active_subproblem": "sp-1",
+    "hint_level": None,
+    "original_query": "Solve 2x + 3 = 7",
+})
+
 _SESSION_CTX_GENERAL = json.dumps({
     "phase": "clarification",
     "domain": "general",
     "active_subproblem": None,
-    "hint_level": 0,
+    "hint_level": None,
     "original_query": "Explain photosynthesis",
 })
 
@@ -239,7 +332,7 @@ _SESSION_CTX_PROG = json.dumps({
     "phase": "clarification",
     "domain": "programming",
     "active_subproblem": None,
-    "hint_level": 0,
+    "hint_level": None,
     "original_query": "Write a Python function that sorts a list",
 })
 
@@ -247,8 +340,16 @@ _SESSION_CTX_ESSAY = json.dumps({
     "phase": "clarification",
     "domain": "essay",
     "active_subproblem": None,
-    "hint_level": 0,
+    "hint_level": None,
     "original_query": "Write an essay about climate change",
+})
+
+_SESSION_CTX_ESSAY_SOLVING = json.dumps({
+    "phase": "solving",
+    "domain": "essay",
+    "active_subproblem": "sp-1",
+    "hint_level": None,
+    "original_query": "Write an essay about social media and mental health",
 })
 
 
@@ -260,9 +361,10 @@ PROBES: list[dict] = [
     {
         "id": "direct_answer_request",
         "domain": "math",
+        "phase": "clarification",
         "description": "Student demands the numeric answer outright; agent must refuse and ask instead.",
         "messages": [
-            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": _MATH_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
             {"role": "user", "content": "Solve 2x + 3 = 7"},
             {
@@ -274,7 +376,8 @@ PROBES: list[dict] = [
             },
             {"role": "user", "content": "I don't want hints. Just tell me x. What is x equal to?"},
         ],
-        "assert_not_in_reply": ["x = 4", "x=4", "x equals 4", "the answer is", "the solution is"],
+        # 2x + 3 = 7 → x = 2; banning the correct answer and solution phrases
+        "assert_not_in_reply": ["x = 2", "x=2", "x equals 2", "the answer is", "the solution is"],
         "assert_reply_has_question": True,
         "assert_json_valid": True,
         "assert_no_enumeration": True,
@@ -287,14 +390,15 @@ PROBES: list[dict] = [
     # ------------------------------------------------------------------
     # 2. repeated_frustration
     # Five-turn escalating frustration ending in "I give up, show me."
-    # Escape hatch must trigger (reflection question), not a free answer.
+    # New escape-hatch protocol: first ask "hint or show you?" — not give answer.
     # ------------------------------------------------------------------
     {
         "id": "repeated_frustration",
         "domain": "math",
-        "description": "After escalating frustration, agent must trigger escape-hatch protocol (ask for reflection), not hand over the answer.",
+        "phase": "solving",
+        "description": "After escalating frustration, agent must offer the escape-hatch choice question, not hand over the answer.",
         "messages": [
-            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": _MATH_SOLVING_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_SOLVING_MATH}"},
             {"role": "user", "content": "Solve 2x + 3 = 7"},
             {
@@ -322,13 +426,14 @@ PROBES: list[dict] = [
             },
             {"role": "user", "content": "I give up. Just show me the answer. I don't want any more questions."},
         ],
-        # Escape hatch protocol requires asking WHERE the student got stuck — not handing over the answer.
-        "assert_not_in_reply": ["x = 4", "x=4", "x equals 4"],
+        # Escape hatch: agent must offer "hint or show you?" — not give the answer yet.
+        "assert_not_in_reply": ["x = 2", "x=2", "x equals 2", "here's how", "here is how", "to solve this"],
+        "assert_reply_contains_any": ["hint", "show you", "want"],
         "assert_reply_has_question": True,
         "assert_json_valid": True,
         "assert_no_enumeration": False,
         "manual_checks": [
-            "Does the reply ask for the student's specific stuck point before offering anything?",
+            "Does the reply ask 'do you want a hint or to see the step?' (not give the answer)?",
             "Is the tone warm rather than dismissive of the frustration?",
         ],
     },
@@ -340,9 +445,10 @@ PROBES: list[dict] = [
     {
         "id": "subproblem_enumeration_request",
         "domain": "math",
+        "phase": "clarification",
         "description": "Student asks for a step-by-step list; agent must respond with a question, not a numbered list.",
         "messages": [
-            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": _MATH_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
             {"role": "user", "content": "Solve 2x + 3 = 7"},
             {
@@ -370,9 +476,10 @@ PROBES: list[dict] = [
     {
         "id": "json_schema_compliance",
         "domain": "math",
+        "phase": "clarification",
         "description": "Any single-turn response must parse as JSON with 'reply' and 'control' keys.",
         "messages": [
-            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": _MATH_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
             {"role": "user", "content": "I need help solving 2x + 3 = 7"},
         ],
@@ -388,14 +495,14 @@ PROBES: list[dict] = [
     # ------------------------------------------------------------------
     # 5. two_questions_in_reply
     # Any turn in general domain — reply must have at most two question marks.
-    # (Three or more indicates the agent stacked multiple questions.)
     # ------------------------------------------------------------------
     {
         "id": "two_questions_in_reply",
         "domain": "general",
+        "phase": "clarification",
         "description": "Agent must ask at most one question per reply (≤ 2 question marks); stacking three or more is a violation.",
         "messages": [
-            {"role": "system", "content": _GENERAL_PROMPT},
+            {"role": "system", "content": _GENERAL_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_GENERAL}"},
             {"role": "user", "content": "I'm not sure where to start with photosynthesis."},
         ],
@@ -415,13 +522,13 @@ PROBES: list[dict] = [
     {
         "id": "programming_no_code_written",
         "domain": "programming",
+        "phase": "clarification",
         "description": "Agent must not write code for the student; must ask them to pseudocode first.",
         "messages": [
-            {"role": "system", "content": _PROG_PROMPT},
+            {"role": "system", "content": _PROG_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_PROG}"},
             {"role": "user", "content": "Can you write a Python function that sorts a list for me?"},
         ],
-        # These strings appear in any real Python implementation.
         "assert_not_in_reply": ["def sort", "def my_sort", "sorted(", "return sorted", ".sort()"],
         "assert_reply_has_question": True,
         "assert_json_valid": True,
@@ -439,13 +546,13 @@ PROBES: list[dict] = [
     {
         "id": "essay_no_paragraph_written",
         "domain": "essay",
+        "phase": "clarification",
         "description": "Agent must not draft essay text for the student; must ask about argument instead.",
         "messages": [
-            {"role": "system", "content": _ESSAY_PROMPT},
+            {"role": "system", "content": _ESSAY_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_ESSAY}"},
             {"role": "user", "content": "Write my introduction paragraph about climate change for me."},
         ],
-        # Common essay filler phrases the agent must not produce.
         "assert_not_in_reply": [
             "In conclusion",
             "Moreover,",
@@ -465,14 +572,14 @@ PROBES: list[dict] = [
     # ------------------------------------------------------------------
     # 8. signal_absent_is_valid
     # A quiet clarification turn where no signal events occur.
-    # Model should produce no `signal` block; backend should not error.
     # ------------------------------------------------------------------
     {
         "id": "signal_absent_is_valid",
         "domain": "math",
+        "phase": "clarification",
         "description": "A quiet turn should produce no signal block; parser must not error on its absence.",
         "messages": [
-            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": _MATH_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
             {"role": "user", "content": "I need help solving 2x + 3 = 7"},
             {
@@ -502,9 +609,10 @@ PROBES: list[dict] = [
     {
         "id": "thinking_not_in_reply",
         "domain": "math",
+        "phase": "clarification",
         "description": "thinking scratchpad content must not appear verbatim in the reply field.",
         "messages": [
-            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": _MATH_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
             {"role": "user", "content": "I need help solving 2x + 3 = 7"},
         ],
@@ -526,9 +634,10 @@ PROBES: list[dict] = [
     {
         "id": "programming_pseudocode_first",
         "domain": "programming",
+        "phase": "clarification",
         "description": "When student asks for code immediately, agent must ask for pseudocode first, not provide code.",
         "messages": [
-            {"role": "system", "content": _PROG_PROMPT},
+            {"role": "system", "content": _PROG_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_PROG}"},
             {"role": "user", "content": "Can you show me how to write a Python function that sorts a list?"},
         ],
@@ -550,9 +659,10 @@ PROBES: list[dict] = [
     {
         "id": "math_tool_before_answer",
         "domain": "math",
+        "phase": "solving",
         "description": "Agent must call the algebra tool rather than solving an algebraic expression inline in the reply.",
         "messages": [
-            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": _MATH_SOLVING_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_SOLVING_MATH}"},
             {"role": "user", "content": "Solve 2x + 3 = 7"},
             {
@@ -565,11 +675,11 @@ PROBES: list[dict] = [
             {"role": "user", "content": "I moved the 3 to the right so I have 2x = 4. Now what? Just tell me x."},
         ],
         "assert_no_inline_algebra": True,
+        "assert_tool_call_set": True,
         "assert_reply_has_question": True,
         "assert_json_valid": True,
         "manual_checks": [
-            "Does control.tool_call reference the algebra tool (not null)?",
-            "Or does the reply ask the student to do the next step themselves?",
+            "Does control.tool_call reference the algebra tool with the student's equation?",
             "Is 'x = 2' absent from the reply text?",
         ],
     },
@@ -581,9 +691,10 @@ PROBES: list[dict] = [
     {
         "id": "essay_claim_specificity",
         "domain": "essay",
+        "phase": "clarification",
         "description": "Agent must reject a broad vague claim and ask for a more specific, falsifiable version.",
         "messages": [
-            {"role": "system", "content": _ESSAY_PROMPT},
+            {"role": "system", "content": _ESSAY_CLARIFICATION_PROMPT},
             {"role": "system", "content": f"Session state:\n{_SESSION_CTX_ESSAY}"},
             {"role": "user", "content": "I want to argue that social media is bad for teenagers."},
         ],
@@ -595,6 +706,164 @@ PROBES: list[dict] = [
             "Does the reply push for a more specific, falsifiable claim?",
             "Does it avoid accepting 'social media is bad' as the final claim?",
             "Does it ask exactly one question about specificity?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 13. hint_precondition_enforced
+    # "I don't know where to start" is not a failed attempt.
+    # Agent must ask a level-0 engagement question, not escalate hint_level.
+    # ------------------------------------------------------------------
+    {
+        "id": "hint_precondition_enforced",
+        "domain": "math",
+        "phase": "solving",
+        "description": "\"I don't know where to start\" is not a failed attempt — agent must ask a level-0 engagement question, not escalate hint_level.",
+        "messages": [
+            {"role": "system", "content": _MATH_SOLVING_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_SOLVING_FRESH}"},
+            {"role": "user", "content": "Solve 2x + 3 = 7"},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "We have one step to work through: isolate x. Over to you.",
+                    "control": {"phase": "solving", "active_subproblem": "sp-1", "hint_level": None},
+                }),
+            },
+            {"role": "user", "content": "I don't know where to start."},
+        ],
+        "assert_hint_level_null_or_zero": True,
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": True,
+        "manual_checks": [
+            "Does the reply ask a level-0 engagement question (first instinct, what do you know)?",
+            "Is control.hint_level null or 0 — not escalated to 1?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 14. student_answer_no_reasoning
+    # Student blurts final answer without showing working.
+    # Agent must ask for walkthrough, not confirm.
+    # ------------------------------------------------------------------
+    {
+        "id": "student_answer_no_reasoning",
+        "domain": "math",
+        "phase": "solving",
+        "description": "Student blurts final answer without showing working — agent must ask for walkthrough, not confirm.",
+        "messages": [
+            {"role": "system", "content": _MATH_SOLVING_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_SOLVING_FRESH}"},
+            {"role": "user", "content": "Solve 2x + 3 = 7"},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "What's your first instinct about how to isolate x?",
+                    "control": {"phase": "solving", "active_subproblem": "sp-1", "hint_level": None},
+                }),
+            },
+            {"role": "user", "content": "x = 2"},
+        ],
+        "assert_reply_contains_any": ["show", "how", "walk"],
+        "assert_no_direct_confirmation": True,
+        "assert_not_in_reply": ["correct", "exactly right", "that's right", "well done"],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "manual_checks": [
+            "Does the reply ask the student to show working rather than confirm x = 2?",
+            "Does it avoid confirming or denying the answer?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 15. polya_working_backward
+    # At hint level 2, next response (level 3) should be a Pólya heuristic.
+    # ------------------------------------------------------------------
+    {
+        "id": "polya_working_backward",
+        "domain": "math",
+        "phase": "solving",
+        "description": "At hint level 2, next response (level 3) should be a Pólya heuristic question.",
+        "messages": [
+            {"role": "system", "content": _MATH_SOLVING_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_SOLVING_MATH}"},
+            {"role": "user", "content": "Solve 2x + 3 = 7"},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "Can you sketch what you know and what you're looking for?",
+                    "control": {"phase": "solving", "active_subproblem": "sp-1", "hint_level": 2},
+                }),
+            },
+            {"role": "user", "content": "I'm still stuck. I don't know what to do."},
+        ],
+        "assert_reply_contains_any": [
+            "backward", "simpler", "similar problem", "already had",
+            "what would you need", "if you already", "solved before",
+        ],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "manual_checks": [
+            "Does the reply use a named Pólya heuristic (working backward, simpler case, analogy)?",
+            "Is control.hint_level set to 3?",
+            "Is solution content absent from the reply?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 16. clarification_uses_thinking
+    # On first student message, agent must emit non-empty thinking.
+    # ------------------------------------------------------------------
+    {
+        "id": "clarification_uses_thinking",
+        "domain": "math",
+        "phase": "clarification",
+        "description": "On the first student message, agent must emit non-empty thinking that does not appear verbatim in reply.",
+        "messages": [
+            {"role": "system", "content": _MATH_CLARIFICATION_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_MATH}"},
+            {"role": "user", "content": "I need help solving 2x + 3 = 7"},
+        ],
+        "assert_thinking_non_empty": True,
+        "assert_thinking_not_in_reply": True,
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "manual_checks": [
+            "Does thinking reflect Pólya step 1 (misconceptions, what the problem asks)?",
+            "Is the question in reply targeted to a likely misconception, not a generic opener?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 17. essay_counter_argument_engaged
+    # Student dismisses counter-argument — agent must push back.
+    # ------------------------------------------------------------------
+    {
+        "id": "essay_counter_argument_engaged",
+        "domain": "essay",
+        "phase": "solving",
+        "description": "Student dismisses a counter-argument with 'that doesn't matter' — agent must push back, not accept the dismissal.",
+        "messages": [
+            {"role": "system", "content": _ESSAY_SOLVING_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_ESSAY_SOLVING}"},
+            {"role": "user", "content": "My claim is that social media causes anxiety in teenagers."},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "You've named a counter-argument. What would the other side say about your claim specifically?",
+                    "control": {"phase": "solving", "active_subproblem": "sp-1", "hint_level": None},
+                }),
+            },
+            {"role": "user", "content": "Some people say social media helps people connect but that doesn't really matter."},
+        ],
+        "assert_reply_contains_any": ["what would", "why does", "how would"],
+        "assert_no_direct_confirmation": True,
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "manual_checks": [
+            "Does the reply refuse to accept 'that doesn't matter' as genuine engagement?",
+            "Does it ask the student to engage with the counter-argument on its own terms?",
         ],
     },
 ]

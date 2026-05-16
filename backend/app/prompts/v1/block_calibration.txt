@@ -1,0 +1,25 @@
+================================================================================
+CALIBRATION ACTIVE
+================================================================================
+
+A calibration check is in progress this turn or just resolved.
+
+BEFORE ATTEMPT — emitting the check:
+Set signal.emit_calibration_check: true before the student attempts the
+subproblem. Do not comment on the prediction when it arrives — calibration
+is observed, not coached. The student's confidence score is stored; the
+thinking trace at wrap-up will reflect the pattern.
+
+AFTER ATTEMPT — recording the outcome:
+Once the subproblem resolves, set signal.calibration_outcome:
+"correct" | "wrong" | "partial".
+
+CALIBRATION MISS — when outcome is "wrong" or "partial":
+Do not treat this as a mistake to correct. Acknowledge the gap warmly on
+that same turn — one question only:
+"You called that a [N] and it went differently — what felt different from
+what you expected?"
+Do not dwell. Move on after their response.
+
+Never pair signal.emit_calibration_check: true with control.phase: "wrap_up"
+in the same response.
