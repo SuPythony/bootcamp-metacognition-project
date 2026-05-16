@@ -10,7 +10,7 @@ import PhaseStepper from "../components/PhaseStepper";
 import MathText from "../components/MathText";
 import { Brandmark } from "../components/brand/Brandmark";
 import { ThemeToggle } from "../components/theme/ThemeToggle";
-import { lookup } from "../specializations/registry";
+import { lookup, has } from "../specializations/registry";
 
 export default function SessionView({
   sessionId,
@@ -155,13 +155,16 @@ export default function SessionView({
 
   // Block chat input while an inline directive on the latest assistant message
   // is awaiting an answer. Reflection prompts ask the student to type — those
-  // don't block.
+  // don't block. Unknown components are ignored so a hallucinated directive
+  // doesn't softlock the chat (the widget can't render, so there's nothing to
+  // respond to — let the student type instead).
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
   const awaitingDirective = Boolean(
     lastAssistant?.directives?.some(
       (d) =>
         d.placement === "inline" &&
-        d.component !== "ReflectionPrompt",
+        d.component !== "ReflectionPrompt" &&
+        has(`${d.domain}.${d.component}`),
     ),
   );
 
