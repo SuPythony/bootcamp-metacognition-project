@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -119,6 +120,15 @@ REFLECTION_QUESTIONS: dict[str, list[str]] = {
         "If a classmate were stuck here, what would you tell them?",
     ],
 }
+
+# Patterns that signal a premature wrap_up close (model closed without asking synthesis).
+# Used as a safety net in _finalize_turn; the prompt fix is the primary prevention.
+WRAP_UP_PREMATURE_CLOSE_PATTERNS = [
+    re.compile(r"\bgreat work\b", re.IGNORECASE),
+    re.compile(r"\bwell done\b", re.IGNORECASE),
+    re.compile(r"\byou('ve| have) (solved|cracked|got it|figured)\b", re.IGNORECASE),
+    re.compile(r"\bgood job\b", re.IGNORECASE),
+]
 
 
 # ---- Request / response models ----------------------------------------------
@@ -780,6 +790,27 @@ async def _finalize_turn(
     previous_phase = session.phase
     session.phase = _validate_phase(session, parsed.control.phase)
     parsed.control.hint_level = _clamp_hint_level(session, parsed.control.hint_level)
+
+    # Safety net: if model closes wrap_up prematurely (congratulating without asking
+    # synthesis), append the synthesis question so the student can still respond.
+    # The prompt fix is the primary prevention; this is the fallback.
+    entering_wrap_up = (previous_phase != "wrap_up" and session.phase == "wrap_up")
+    if (
+        entering_wrap_up
+        and not emit_trigger
+        and not calibration_requested
+        and parsed.reply is not None
+        and any(p.search(parsed.reply) for p in WRAP_UP_PREMATURE_CLOSE_PATTERNS)
+    ):
+        _log.warning(
+            "session=%s wrap_up premature close detected — appending synthesis question",
+            session.session_id[:8],
+        )
+        parsed.reply += (
+            "\n\nBefore we finish — can you walk me through the full solution "
+            "in your own words?"
+        )
+
     _apply_agent_response(session, parsed)
     session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
 
@@ -817,10 +848,13 @@ async def _finalize_turn(
         "tool_called": (parsed.control.tool_call.get("name") if isinstance(parsed.control.tool_call, dict) else None),
         "phase_after": session.phase,
     })
-    # wrap_up_complete: True once the reflection round-trip is done (or if the agent
-    # entered wrap_up without requesting a reflection at all).
+    # wrap_up_complete: True once the reflection round-trip is done.
+    # Never True on the first turn entering wrap_up — the student must have a chance
+    # to answer the synthesis question before the session ends.
     wrap_up_complete = (
-        session.phase == "wrap_up" and session.pending_reflection_index is None
+        session.phase == "wrap_up"
+        and session.pending_reflection_index is None
+        and not entering_wrap_up
     )
 
     session_mod.put(session)

@@ -660,6 +660,7 @@ async def stream_tutor(
         "messages": messages,
         "max_tokens": max_tokens,
         "stream": True,
+        "stream_options": {"include_usage": True},
         "response_format": response_format,
     }
     if temperature is not None:
@@ -672,6 +673,7 @@ async def stream_tutor(
     url = f"{_base_url().rstrip('/')}/chat/completions"
     full_content = ""
     extractor = _ReplyExtractor()
+    stream_usage: dict = {}
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -695,6 +697,9 @@ async def stream_tutor(
                         chunk_json = json.loads(data_str)
                     except json.JSONDecodeError:
                         continue
+                    # Capture usage from the final usage chunk (present when include_usage is True).
+                    if chunk_json.get("usage"):
+                        stream_usage = chunk_json["usage"]
                     try:
                         delta = chunk_json["choices"][0]["delta"].get("content") or ""
                     except (KeyError, IndexError):
@@ -728,8 +733,8 @@ async def stream_tutor(
         "session_id": session_id,
         "model": model,
         "latency_ms": int((time.monotonic() - t0) * 1000),
-        "input_tokens": 0,
-        "output_tokens": len(full_content.split()),
+        "input_tokens": stream_usage.get("prompt_tokens", 0),
+        "output_tokens": stream_usage.get("completion_tokens", len(full_content.split())),
         "raw_output": cleaned,
         "user_message_preview": next(
             (m["content"][:300] for m in reversed(messages) if m.get("role") == "user"), None

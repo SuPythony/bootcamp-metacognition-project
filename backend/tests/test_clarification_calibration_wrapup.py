@@ -255,9 +255,8 @@ def test_wrap_up_complete_true_after_quality_evaluation(client, fake_openrouter)
     assert resp.json()["wrap_up_complete"] is True
 
 
-def test_wrap_up_complete_true_without_reflection(client, fake_openrouter):
-    """If agent enters wrap_up without emitting emit_reflection, wrap_up_complete
-    is True immediately (no reflection pending)."""
+def test_wrap_up_complete_false_on_first_wrap_up_turn(client, fake_openrouter):
+    """First turn entering wrap_up is always False — student must have a chance to respond."""
     sid = _new_session(client, fake_openrouter)
     _advance_to_wrap_up(client, fake_openrouter, sid)
 
@@ -266,7 +265,27 @@ def test_wrap_up_complete_true_without_reflection(client, fake_openrouter):
     ]
     resp = client.post("/chat", json={"session_id": sid, "message": "x is 2."})
     assert resp.status_code == 200
-    # No pending reflection → immediately complete.
+    # First time entering wrap_up: student must still respond before session ends.
+    assert resp.json()["wrap_up_complete"] is False
+
+
+def test_wrap_up_complete_true_on_subsequent_wrap_up_turn(client, fake_openrouter):
+    """After student responds in wrap_up with no pending reflection, wrap_up_complete is True."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    # First wrap_up turn (synthesis question or premature close).
+    fake_openrouter.responses = [
+        _agent_reply("Well done! You solved it.", phase="wrap_up"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+
+    # Second turn: student responds; model closes warmly without emit_reflection.
+    fake_openrouter.responses = [
+        _agent_reply("Great — see you next time!"),
+    ]
+    resp = client.post("/chat", json={"session_id": sid, "message": "Thanks!"})
+    assert resp.status_code == 200
     assert resp.json()["wrap_up_complete"] is True
 
 
