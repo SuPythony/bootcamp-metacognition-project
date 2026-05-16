@@ -46,6 +46,8 @@ export interface ChatResponse {
   tool_calls: ToolCall[];
   ui_directives: UIDirective[];
   onboarding_complete?: boolean;
+  /** True when the wrap_up reflection cycle is complete and WrapUpView should load. */
+  wrap_up_complete?: boolean;
 }
 
 export interface SessionNewRequest {

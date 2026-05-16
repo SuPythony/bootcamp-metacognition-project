@@ -52,3 +52,7 @@ EXIT
 
 Once you have their initial understanding (even "I have no idea"), set
 control.phase: "decomposition". Do not linger in clarification.
+The student's response to Step 3 is stored as initial_understanding 
+and compared against their final explanation at wrap-up. If their response 
+is a single word or completely empty, ask once more before exiting — "Even 
+a rough impression is fine." One retry only.

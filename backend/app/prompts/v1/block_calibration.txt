@@ -4,6 +4,10 @@ CALIBRATION ACTIVE
 
 A calibration check is in progress this turn or just resolved.
 
+When emitting signal.emit_calibration_check: true, set reply to null — the backend 
+renders the confidence widget as the student's prompt. Do not write a 
+question in reply on this turn.
+
 BEFORE ATTEMPT — emitting the check:
 Set signal.emit_calibration_check: true before the student attempts the
 subproblem. Do not comment on the prediction when it arrives — calibration

@@ -147,6 +147,12 @@ export default function SessionView({
         const sidePanelNew = allDirectives.filter((d) => d.placement === "side_panel");
         const modalNew = allDirectives.filter((d) => d.placement === "modal");
 
+        // When the backend strips reply due to the calibration/reflection XOR, any
+        // tokens that already streamed must be cleared so the widget is the only prompt.
+        const suppressesReply = inlineDirectives.some(
+          (d) => d.component === "ReflectionPrompt" || d.component === "CalibrationCheck"
+        );
+
         // Patch the streaming bubble with final content + directives.
         // Drop the empty bubble if reply is null and there are no inline
         // directives (tool-only turns), so we don't leave an empty assistant
@@ -160,7 +166,7 @@ export default function SessionView({
             } else {
               updated[updated.length - 1] = {
                 ...last,
-                content: res.reply ?? last.content,
+                content: res.reply ?? (suppressesReply ? "" : last.content),
                 directives: inlineDirectives,
               };
             }
@@ -183,7 +189,9 @@ export default function SessionView({
 
         if (res.onboarding_complete) {
           setTimeout(() => onOnboardingComplete?.(), 1200);
-        } else if (res.phase === "wrap_up") {
+        } else if (res.wrap_up_complete) {
+          // Only transition after the full reflection round-trip is done.
+          // The "End session →" header button is the manual escape hatch.
           setTimeout(onWrapUp, 1800);
         }
       },
@@ -396,6 +404,14 @@ export default function SessionView({
             </AnimatePresence>
           </div>
         </header>
+
+        {(phase === "clarification" || phase === "wrap_up") && (
+          <div className="px-6 py-2 border-b border-rule bg-surface text-caption text-ink-soft shrink-0">
+            {phase === "clarification"
+              ? "First, let's make sure we understand the problem."
+              : "Let's look back at what you learned."}
+          </div>
+        )}
 
         <div id="chat-pane" className="flex flex-col flex-1 min-h-0">
           <ChatPane

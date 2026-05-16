@@ -97,24 +97,26 @@ _VARIANT_DOMAIN_MAP: dict[str, str] = parse_domain_variants(
 # Backend selects the question; the model emits only the trigger type.
 
 REFLECTION_QUESTIONS: dict[str, list[str]] = {
-    "periodic": [
-        "What was different about how you approached this part compared to the last one?",
-        "Is there anything about your thinking on that step that surprised you?",
-        "If you had to do that step again from scratch, what would you do differently?",
+    "wrap_up": [
+        "What was the move that unlocked this problem for you?",
+        "Where could you have gone wrong — what would you watch out for next time?",
+        "Could you use the same approach on a different kind of problem?",
+        "What did you know at the start that you didn't realise you knew?",
     ],
     "self_correction": [
-        "What made you change your mind just then?",
-        "How did you notice the mistake — what tipped you off?",
-        "What does catching that tell you about how you're thinking through this?",
+        "What made you change your mind?",
+        "How did you catch that mistake?",
+        "What were you assuming that turned out to be wrong?",
     ],
     "escape_hatch": [
-        "Before I show you — in one sentence, where exactly did your thinking get stuck?",
-        "Just one sentence: what was the specific moment you felt you hit a wall?",
+        "Where exactly did your thinking get stuck?",
+        "What would you try differently if you saw this again?",
+        "What was the gap between what you tried and what the problem needed?",
     ],
-    "wrap_up": [
-        "Can you walk me through the full solution in your own words — start to finish?",
-        "If you were explaining this to a friend, what would you say was the key insight?",
-        "What would you tell someone who's about to tackle this same problem?",
+    "periodic": [
+        "What felt different about that part compared to the last?",
+        "Was there a moment you almost went the wrong way?",
+        "If a classmate were stuck here, what would you tell them?",
     ],
 }
 
@@ -221,6 +223,9 @@ class ChatResponse(BaseModel):
     # Shaped as ToolCall: { name, ui_component, display_data, ... }
     tool_calls: list[dict] = Field(default_factory=list)
     onboarding_complete: bool = False
+    # True when the wrap_up reflection cycle is complete and the frontend
+    # should transition to WrapUpView. False while a reflection is still pending.
+    wrap_up_complete: bool = False
 
 
 # ---- Helpers ----------------------------------------------------------------
@@ -351,9 +356,10 @@ def _apply_agent_response(session: Session, parsed: AgentResponse) -> None:
         # Reflection trigger — queue and remember index for next-turn quality attach.
         emit_trigger = signal.emit_reflection
         if emit_trigger:
-            question = random.choice(
-                REFLECTION_QUESTIONS.get(emit_trigger, REFLECTION_QUESTIONS["periodic"])
-            )
+            already_asked = {rp.question for rp in session.reflection_prompts}
+            bank = REFLECTION_QUESTIONS.get(emit_trigger, REFLECTION_QUESTIONS["periodic"])
+            available = [q for q in bank if q not in already_asked] or bank
+            question = random.choice(available)
             rp = ReflectionPrompt(trigger=emit_trigger, question=question)
             session.reflection_prompts.append(rp)
             session.pending_reflection_index = len(session.reflection_prompts) - 1
@@ -438,6 +444,7 @@ def _build_chat_response(
     frontend_tool_call: dict | None = None,
     backend_tool_result: dict | None = None,
     onboarding_complete: bool = False,
+    wrap_up_complete: bool = False,
 ) -> ChatResponse:
     directives = list(parsed.control.ui_directives)
 
@@ -499,6 +506,7 @@ def _build_chat_response(
         frontend_tool_call=frontend_tool_call,
         tool_calls=[backend_tool_result] if backend_tool_result else [],
         onboarding_complete=onboarding_complete,
+        wrap_up_complete=wrap_up_complete,
     )
 
 
@@ -762,6 +770,13 @@ async def _finalize_turn(
         )
         parsed.control.phase = None
 
+    # XOR: calibration check and reflection cards replace the reply on that turn.
+    # Suppression happens before _validate_phase so the empty reply is recorded in
+    # message_history, and before streaming state so the frontend never renders both.
+    emit_trigger = parsed.signal.emit_reflection if parsed.signal else None
+    if calibration_requested or emit_trigger:
+        parsed.reply = None
+
     previous_phase = session.phase
     session.phase = _validate_phase(session, parsed.control.phase)
     parsed.control.hint_level = _clamp_hint_level(session, parsed.control.hint_level)
@@ -802,12 +817,19 @@ async def _finalize_turn(
         "tool_called": (parsed.control.tool_call.get("name") if isinstance(parsed.control.tool_call, dict) else None),
         "phase_after": session.phase,
     })
+    # wrap_up_complete: True once the reflection round-trip is done (or if the agent
+    # entered wrap_up without requesting a reflection at all).
+    wrap_up_complete = (
+        session.phase == "wrap_up" and session.pending_reflection_index is None
+    )
+
     session_mod.put(session)
     return _build_chat_response(
         session, parsed,
         frontend_tool_call=frontend_tool,
         backend_tool_result=backend_tool_result,
         onboarding_complete=onboarding_complete,
+        wrap_up_complete=wrap_up_complete,
     )
 
 
