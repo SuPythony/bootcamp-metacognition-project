@@ -294,6 +294,31 @@ async def test_probe_against_llm(probe):
             '{"reply": "That\'s a good claim! Social media being bad for teenagers is a strong argument.", "control": {}}',
             "essay_claim_specificity",
         ),
+        # hint_precondition_enforced: reply escalates hint_level to 1 on a confused question
+        (
+            '{"reply": "What does \'equals\' mean in this equation?", "control": {"hint_level": 1}}',
+            "hint_precondition_enforced",
+        ),
+        # student_answer_no_reasoning: reply confirms the answer without asking for working
+        (
+            '{"reply": "Yes, exactly right! x = 2 is correct.", "control": {}}',
+            "student_answer_no_reasoning",
+        ),
+        # polya_working_backward: reply gives a procedural hint with no Pólya phrasing
+        (
+            '{"reply": "Try subtracting 3 from both sides and see what you get.", "control": {"hint_level": 3}}',
+            "polya_working_backward",
+        ),
+        # clarification_uses_thinking: thinking field is empty
+        (
+            '{"thinking": "", "reply": "What do you think?", "control": {}}',
+            "clarification_uses_thinking",
+        ),
+        # essay_counter_argument_engaged: reply accepts the dismissal
+        (
+            '{"reply": "Fair point — if the connection argument isn\'t relevant, you can move on.", "control": {}}',
+            "essay_counter_argument_engaged",
+        ),
     ],
 )
 def test_probe_canned_bad_reply_fails_assertions(bad_reply: str, probe_id: str) -> None:
