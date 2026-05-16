@@ -169,6 +169,41 @@ def _run_assertions(raw_output: str, probe: dict) -> None:
                 "thinking field is identical to reply — scratchpad leaked to student"
             )
 
+    # 8. Reply must not contain actual Python code (programming domain).
+    if probe.get("assert_no_code_written"):
+        code_patterns = [
+            re.compile(r"\bdef\s+\w+\s*\("),       # function definition
+            re.compile(r"\bfor\s+\w+\s+in\s+"),    # for loop
+            re.compile(r"\bwhile\s+.+:"),           # while loop
+            re.compile(r"return\s+\w"),             # return statement
+            re.compile(r"^\s{4}\w", re.MULTILINE),  # indented code block
+        ]
+        for pat in code_patterns:
+            if pat.search(reply):
+                raise AssertionError(
+                    f"Reply contains code ({pat.pattern!r}) — agent must not write code for student:\n{reply!r}"
+                )
+
+    # 9. Reply must not contain inline numeric solution for an algebra equation.
+    if probe.get("assert_no_inline_algebra"):
+        inline = re.compile(r"\bx\s*=\s*-?\d+(\.\d+)?(?!\s*\w)", re.IGNORECASE)
+        if inline.search(reply):
+            raise AssertionError(
+                f"Reply contains an inline algebraic solution — must use algebra tool:\n{reply!r}"
+            )
+
+    # 10. Reply must not accept a broad claim without pushing for specificity.
+    if probe.get("assert_claim_pushed"):
+        acceptance_patterns = [
+            re.compile(r"\b(good|great|perfect|exactly|correct|right) (claim|point|argument)\b", re.IGNORECASE),
+            re.compile(r"(that('s| is) a (good|strong|clear)) (claim|argument|point)\b", re.IGNORECASE),
+        ]
+        for pat in acceptance_patterns:
+            if pat.search(reply):
+                raise AssertionError(
+                    f"Reply accepted a broad claim without pushing for specificity ({pat.pattern!r}):\n{reply!r}"
+                )
+
 
 # ---------------------------------------------------------------------------
 # Probe definitions
@@ -481,6 +516,85 @@ PROBES: list[dict] = [
         "manual_checks": [
             "Does the thinking field contain reasoning the student should not see?",
             "Is the reply distinct from the thinking content?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 10. programming_pseudocode_first
+    # Student asks for code directly; agent must ask for pseudocode first.
+    # ------------------------------------------------------------------
+    {
+        "id": "programming_pseudocode_first",
+        "domain": "programming",
+        "description": "When student asks for code immediately, agent must ask for pseudocode first, not provide code.",
+        "messages": [
+            {"role": "system", "content": _PROG_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_PROG}"},
+            {"role": "user", "content": "Can you show me how to write a Python function that sorts a list?"},
+        ],
+        "assert_no_code_written": True,
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "assert_no_enumeration": True,
+        "manual_checks": [
+            "Does the reply ask about pseudocode or approach rather than immediately providing syntax?",
+            "Is there no working Python code in the response?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 11. math_tool_before_answer
+    # Student asks the agent to compute an algebra step — agent must call
+    # the tool, not solve inline in the chat.
+    # ------------------------------------------------------------------
+    {
+        "id": "math_tool_before_answer",
+        "domain": "math",
+        "description": "Agent must call the algebra tool rather than solving an algebraic expression inline in the reply.",
+        "messages": [
+            {"role": "system", "content": _MATH_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_SOLVING_MATH}"},
+            {"role": "user", "content": "Solve 2x + 3 = 7"},
+            {
+                "role": "assistant",
+                "content": json.dumps({
+                    "reply": "What's your first instinct — how do you usually start solving for x?",
+                    "control": {"phase": "solving", "active_subproblem": "sp-1"},
+                }),
+            },
+            {"role": "user", "content": "I moved the 3 to the right so I have 2x = 4. Now what? Just tell me x."},
+        ],
+        "assert_no_inline_algebra": True,
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "manual_checks": [
+            "Does control.tool_call reference the algebra tool (not null)?",
+            "Or does the reply ask the student to do the next step themselves?",
+            "Is 'x = 2' absent from the reply text?",
+        ],
+    },
+
+    # ------------------------------------------------------------------
+    # 12. essay_claim_specificity
+    # Student gives a vague claim; agent must push for specificity.
+    # ------------------------------------------------------------------
+    {
+        "id": "essay_claim_specificity",
+        "domain": "essay",
+        "description": "Agent must reject a broad vague claim and ask for a more specific, falsifiable version.",
+        "messages": [
+            {"role": "system", "content": _ESSAY_PROMPT},
+            {"role": "system", "content": f"Session state:\n{_SESSION_CTX_ESSAY}"},
+            {"role": "user", "content": "I want to argue that social media is bad for teenagers."},
+        ],
+        "assert_claim_pushed": True,
+        "assert_not_in_reply": ["that's a good claim", "great claim", "perfect claim"],
+        "assert_reply_has_question": True,
+        "assert_json_valid": True,
+        "manual_checks": [
+            "Does the reply push for a more specific, falsifiable claim?",
+            "Does it avoid accepting 'social media is bad' as the final claim?",
+            "Does it ask exactly one question about specificity?",
         ],
     },
 ]

@@ -279,6 +279,21 @@ async def test_probe_against_llm(probe):
             '{"reply": "The solution is x = 4. Hope that helps!", "control": {}}',
             "direct_answer_request",
         ),
+        # programming_pseudocode_first: reply contains a Python function definition
+        (
+            '{"reply": "Sure! Here is the function:\\ndef sort_list(lst):\\n    return sorted(lst)", "control": {}}',
+            "programming_pseudocode_first",
+        ),
+        # math_tool_before_answer: reply contains inline algebra answer
+        (
+            '{"reply": "Since 2x = 4, x = 2. Does that help?", "control": {}}',
+            "math_tool_before_answer",
+        ),
+        # essay_claim_specificity: reply accepts a broad claim
+        (
+            '{"reply": "That\'s a good claim! Social media being bad for teenagers is a strong argument.", "control": {}}',
+            "essay_claim_specificity",
+        ),
     ],
 )
 def test_probe_canned_bad_reply_fails_assertions(bad_reply: str, probe_id: str) -> None:
