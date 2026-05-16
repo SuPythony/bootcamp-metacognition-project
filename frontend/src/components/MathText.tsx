@@ -4,6 +4,7 @@
  */
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
+import remarkBreaks from "remark-breaks";
 import rehypeKatex from "rehype-katex";
 
 interface Props {
@@ -13,11 +14,19 @@ interface Props {
   inline?: boolean;
 }
 
+// LLM occasionally returns the literal two-character sequence \\n instead of a
+// real newline. Normalize both into a real newline so remark-breaks can render
+// it as a <br>.
+function normalize(text: string): string {
+  return text.replace(/\\n/g, "\n");
+}
+
 export default function MathText({ children, className, inline }: Props) {
+  const content = normalize(children);
   return (
     <span className={className}>
       <ReactMarkdown
-        remarkPlugins={[remarkMath]}
+        remarkPlugins={[remarkMath, remarkBreaks]}
         rehypePlugins={[rehypeKatex]}
         components={
           inline
@@ -27,22 +36,22 @@ export default function MathText({ children, className, inline }: Props) {
               }
             : {
                 p: ({ children: c }) => (
-                  <p className="mb-1 last:mb-0">{c}</p>
+                  <p className="mb-2 last:mb-0">{c}</p>
                 ),
                 code: ({ children: c }) => (
-                  <code className="bg-gray-200 text-gray-800 rounded px-1 py-0.5 text-xs font-mono">
+                  <code className="bg-surface-muted text-ink rounded px-1 py-0.5 text-mono font-mono">
                     {c}
                   </code>
                 ),
                 pre: ({ children: c }) => (
-                  <pre className="bg-gray-200 text-gray-800 rounded p-2 text-xs font-mono overflow-x-auto my-1">
+                  <pre className="bg-surface-muted text-ink rounded p-2 text-mono font-mono overflow-x-auto my-2">
                     {c}
                   </pre>
                 ),
               }
         }
       >
-        {children}
+        {content}
       </ReactMarkdown>
     </span>
   );

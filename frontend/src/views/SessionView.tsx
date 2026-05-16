@@ -1,28 +1,29 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { FileText } from "lucide-react";
 import type { Phase, Subproblem, UIDirective, ToolCall, Domain } from "../api/types";
 import { api } from "../api/client";
 import ChatPane, { type ChatMessage } from "../components/ChatPane";
 import SubproblemPanel from "../components/SubproblemPanel";
 import ToolPane from "../components/ToolPane";
+import PhaseStepper from "../components/PhaseStepper";
+import MathText from "../components/MathText";
+import { Brandmark } from "../components/brand/Brandmark";
+import { ThemeToggle } from "../components/theme/ThemeToggle";
 import { lookup } from "../specializations/registry";
-
-const PHASE_LABEL: Record<Phase, string> = {
-  clarification: "Clarification",
-  decomposition: "Decomposition",
-  solving: "Solving",
-  wrap_up: "Wrap-up",
-};
 
 export default function SessionView({
   sessionId,
   domain,
   openingMessage,
+  originalQuery,
   onWrapUp,
   onOnboardingComplete,
 }: {
   sessionId: string;
   domain: Domain;
   openingMessage: string;
+  originalQuery: string;
   onWrapUp: () => void;
   onOnboardingComplete?: () => void;
 }) {
@@ -35,6 +36,8 @@ export default function SessionView({
   const [toolResults, setToolResults] = useState<ToolCall[]>([]);
   const [modalDirective, setModalDirective] = useState<UIDirective | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [problemOpen, setProblemOpen] = useState(false);
+  const problemBtnRef = useRef<HTMLButtonElement | null>(null);
 
   async function send(message?: string, directiveResponse?: { component: string; value: unknown }) {
     setIsLoading(true);
@@ -96,46 +99,161 @@ export default function SessionView({
     send(text);
   }
 
+  function formatDirectiveValue(component: string, value: unknown): string {
+    if (component === "CalibrationCheck" && typeof value === "number") {
+      return `My confidence: ${value}/5`;
+    }
+    if (component === "ConfidenceWidget" && typeof value === "number") {
+      return `Confidence in solution: ${value}/5`;
+    }
+    if (component === "RuleRecallPrompt" && typeof value === "string") {
+      return value;
+    }
+    if (typeof value === "string") return value;
+    if (typeof value === "number") return String(value);
+    return JSON.stringify(value);
+  }
+
   function handleDirectiveResponse(component: string, value: unknown) {
     setModalDirective(null);
+    const text = formatDirectiveValue(component, value);
+    setMessages((prev) => {
+      const cleared = prev.map((m, i) =>
+        m.role === "assistant" && i === prev.length - 1
+          ? { ...m, directives: m.directives?.filter((d) => d.component !== component) }
+          : m,
+      );
+      return [...cleared, { role: "user", content: text }];
+    });
     send(undefined, { component, value });
   }
 
+  // Block chat input while an inline directive on the latest assistant message
+  // is awaiting an answer. Reflection prompts ask the student to type — those
+  // don't block.
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  const awaitingDirective = Boolean(
+    lastAssistant?.directives?.some(
+      (d) =>
+        d.placement === "inline" &&
+        d.component !== "ReflectionPrompt",
+    ),
+  );
+
+  useEffect(() => {
+    if (!modalDirective) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setModalDirective(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [modalDirective]);
+
+  useEffect(() => {
+    if (!problemOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setProblemOpen(false);
+    };
+    const onClick = (e: MouseEvent) => {
+      const popover = document.getElementById("original-problem-popover");
+      const btn = problemBtnRef.current;
+      const target = e.target as Node;
+      if (popover?.contains(target) || btn?.contains(target)) return;
+      setProblemOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onClick);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onClick);
+    };
+  }, [problemOpen]);
+
   return (
-    <div className="flex h-screen bg-white overflow-hidden">
+    <div className="flex h-screen bg-paper overflow-hidden">
+      <a
+        href="#chat-pane"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:bg-accent focus:text-white focus:px-3 focus:py-1.5 focus:rounded-md focus:text-body-emphasis"
+      >
+        Skip to chat
+      </a>
       {/* Main column */}
       <div className="flex flex-col flex-1 min-w-0 min-h-0">
         {/* Header */}
-        <header className="flex items-center justify-between px-4 py-3 border-b bg-white shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold text-gray-800 capitalize">
+        <header className="flex items-center justify-between gap-4 px-5 py-3 border-b border-rule bg-paper shrink-0">
+          <div className="flex items-center gap-3 shrink-0">
+            <Brandmark size={24} />
+            <span className="font-mono text-mono text-ink-soft capitalize">
               {domain}
             </span>
-            <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
-              {PHASE_LABEL[phase]}
-            </span>
           </div>
-          <button
-            onClick={onWrapUp}
-            className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
-          >
-            End session →
-          </button>
+          <div className="flex-1 flex justify-center min-w-0">
+            <PhaseStepper phase={phase} />
+          </div>
+          <div className="flex items-center gap-2 shrink-0 relative">
+            <button
+              ref={problemBtnRef}
+              onClick={() => setProblemOpen((o) => !o)}
+              aria-expanded={problemOpen}
+              aria-controls="original-problem-popover"
+              className="inline-flex items-center gap-1.5 text-caption text-ink-soft hover:text-ink border border-rule rounded-md px-2 py-1 transition-colors"
+            >
+              <FileText size={12} strokeWidth={1.8} />
+              Problem
+            </button>
+            <ThemeToggle />
+            <button
+              onClick={onWrapUp}
+              className="text-caption text-ink-faint hover:text-ink-soft transition-colors px-2 py-1"
+            >
+              End session →
+            </button>
+
+            <AnimatePresence>
+              {problemOpen && (
+                <motion.div
+                  id="original-problem-popover"
+                  role="dialog"
+                  aria-label="Original problem"
+                  initial={{ opacity: 0, y: -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+                  className="absolute right-0 top-full mt-2 w-[min(420px,90vw)] z-40 bg-surface border border-rule rounded-md shadow-lg p-4 space-y-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <p className="text-label text-ink-faint">Original problem</p>
+                    <button
+                      onClick={() => setProblemOpen(false)}
+                      aria-label="Close"
+                      className="text-caption text-ink-faint hover:text-ink-soft"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="text-body text-ink leading-relaxed max-h-64 overflow-y-auto">
+                    <MathText>{originalQuery}</MathText>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </header>
 
-        <ChatPane
-          messages={messages}
-          isLoading={isLoading}
-          onSend={handleSend}
-          onDirectiveResponse={handleDirectiveResponse}
-          domain={domain}
-        />
+        <div id="chat-pane" className="flex flex-col flex-1 min-h-0">
+          <ChatPane
+            messages={messages}
+            isLoading={isLoading}
+            inputDisabled={awaitingDirective}
+            onSend={handleSend}
+            onDirectiveResponse={handleDirectiveResponse}
+            domain={domain}
+          />
+        </div>
       </div>
 
-      {/* Subproblem sidebar */}
-      {subproblems.length > 0 && (
-        <SubproblemPanel subproblems={subproblems} />
-      )}
+      {/* Subproblem sidebar — always rendered; shows empty state pre-decomposition */}
+      <SubproblemPanel subproblems={subproblems} />
 
       {/* Tool pane */}
       <ToolPane
@@ -146,28 +264,48 @@ export default function SessionView({
       />
 
       {/* Modal overlay — only mount if the component is registered */}
-      {modalDirective && (() => {
-        const Component = lookup(`${modalDirective.domain}.${modalDirective.component}`);
-        if (!Component) return null;
-        return (
-          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full space-y-4">
-              <Component
-                {...modalDirective.props}
-                onSelect={(value: unknown) =>
-                  handleDirectiveResponse(modalDirective.component, value)
-                }
-              />
-              <button
-                onClick={() => setModalDirective(null)}
-                className="w-full text-xs text-gray-400 hover:text-gray-600 transition-colors"
+      <AnimatePresence>
+        {modalDirective && (() => {
+          const Component = lookup(`${modalDirective.domain}.${modalDirective.component}`);
+          if (!Component) return null;
+          return (
+            <motion.div
+              key="modal"
+              role="dialog"
+              aria-modal="true"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="fixed inset-0 bg-ink/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              onClick={() => setModalDirective(null)}
+            >
+              <motion.div
+                initial={{ opacity: 0, y: 12, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 12, scale: 0.97 }}
+                transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-surface border border-rule rounded-lg shadow-xl p-6 max-w-sm w-full space-y-4"
               >
-                Dismiss
-              </button>
-            </div>
-          </div>
-        );
-      })()}
+                <Component
+                  {...modalDirective.props}
+                  onSelect={(value: unknown) =>
+                    handleDirectiveResponse(modalDirective.component, value)
+                  }
+                />
+                <button
+                  onClick={() => setModalDirective(null)}
+                  aria-label="Dismiss dialog"
+                  className="w-full text-caption text-ink-faint hover:text-ink-soft transition-colors"
+                >
+                  Dismiss (Esc)
+                </button>
+              </motion.div>
+            </motion.div>
+          );
+        })()}
+      </AnimatePresence>
     </div>
   );
 }

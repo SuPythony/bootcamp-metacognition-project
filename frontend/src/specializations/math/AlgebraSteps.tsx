@@ -13,22 +13,28 @@ export default function AlgebraSteps({
   final: string;
 }) {
   return (
-    <div data-testid="algebra-steps" className="text-sm space-y-1.5">
-      <ol className="space-y-1.5 list-none">
+    <div data-testid="algebra-steps" className="text-body">
+      <ol className="space-y-2 list-none">
         {steps.map((s, i) => (
-          <li key={i} className="flex items-baseline gap-2">
-            <span className="shrink-0 text-gray-400 text-xs w-4 text-right">
+          <li key={i} className="grid grid-cols-[20px_1fr_auto] items-baseline gap-3">
+            <span className="font-mono text-mono text-ink-faint text-right">
               {i + 1}.
             </span>
-            <span className="flex-1">
+            <span className="text-ink">
               <MathText inline>{`$${s.expr}$`}</MathText>
             </span>
-            <span className="text-xs text-gray-500 italic shrink-0">{s.rule}</span>
+            <span className="font-display text-caption italic text-ink-soft shrink-0">
+              {s.rule}
+            </span>
           </li>
         ))}
       </ol>
-      <div className="mt-2 pt-2 border-t border-gray-200 font-semibold">
-        <MathText inline>{`$${final}$`}</MathText>
+      <div className="mt-3 pt-3 border-t border-rule grid grid-cols-[20px_1fr_auto] items-baseline gap-3">
+        <span className="font-mono text-mono text-accent text-right">∴</span>
+        <span className="text-body-emphasis text-ink">
+          <MathText inline>{`$${final}$`}</MathText>
+        </span>
+        <span className="text-label text-accent">final</span>
       </div>
     </div>
   );
