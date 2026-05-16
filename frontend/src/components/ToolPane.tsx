@@ -20,12 +20,10 @@ export default function ToolPane({
   return (
     <aside
       data-testid="tool-pane"
-      className="w-72 border-l bg-white flex flex-col"
+      className="w-80 border-l border-rule bg-surface flex flex-col shadow-sm"
     >
-      <div className="px-4 py-3 border-b">
-        <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-          Tools
-        </h2>
+      <div className="px-4 py-3 border-b border-rule">
+        <h2 className="text-label text-ink-faint">Tools</h2>
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         {toolResults.map((tool, i) => {
@@ -33,13 +31,13 @@ export default function ToolPane({
           const Component = lookup(`${domain}.${tool.ui_component}`);
           if (!Component) {
             return (
-              <div key={i} className="text-xs text-gray-400 p-2">
+              <div key={i} className="text-caption text-ink-faint p-2">
                 Unknown component: {tool.ui_component}
               </div>
             );
           }
           return (
-            <div key={i} className="rounded-xl border p-3">
+            <div key={i} className="rounded-md border border-rule bg-paper p-3">
               <Component {...(tool.display_data ?? {})} />
             </div>
           );
@@ -49,13 +47,13 @@ export default function ToolPane({
           const Component = lookup(`${d.domain}.${d.component}`);
           if (!Component) {
             return (
-              <div key={i} className="text-xs text-gray-400 p-2">
+              <div key={i} className="text-caption text-ink-faint p-2">
                 Unknown: {d.component}
               </div>
             );
           }
           return (
-            <div key={i} className="rounded-xl border p-3">
+            <div key={i} className="rounded-md border border-rule bg-paper p-3">
               <Component
                 {...d.props}
                 onSelect={(value: unknown) =>

@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from "react";
+import { motion } from "framer-motion";
+import { CornerDownLeft, Send } from "lucide-react";
 import MathText from "./MathText";
 import type { UIDirective, Domain } from "../api/types";
 import { lookup } from "../specializations/registry";
@@ -9,19 +11,67 @@ export interface ChatMessage {
   directives?: UIDirective[];
 }
 
+function BreathingDots() {
+  return (
+    <span
+      role="status"
+      aria-label="Tutor is thinking"
+      className="inline-flex items-end gap-1 h-4"
+    >
+      {[0, 1, 2].map((i) => (
+        <motion.span
+          key={i}
+          className="block w-1.5 h-1.5 rounded-full bg-ink-faint"
+          animate={{ opacity: [0.3, 1, 0.3], y: [0, -2, 0] }}
+          transition={{
+            duration: 1.2,
+            repeat: Infinity,
+            ease: "easeInOut",
+            delay: i * 0.15,
+          }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function AssistantMessage({ children }: { children: string }) {
+  return (
+    <div className="pl-4 border-l-2 border-rule space-y-1.5">
+      <p className="text-label text-ink-faint">Tutor</p>
+      <div className="text-body text-ink leading-relaxed">
+        <MathText>{children}</MathText>
+      </div>
+    </div>
+  );
+}
+
+function UserMessage({ children }: { children: string }) {
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[80%] bg-accent-soft text-ink rounded-md px-4 py-2.5 text-body leading-relaxed">
+        <span className="whitespace-pre-wrap">{children}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function ChatPane({
   messages,
   isLoading,
+  inputDisabled,
   onSend,
   onDirectiveResponse,
   domain,
 }: {
   messages: ChatMessage[];
   isLoading: boolean;
+  inputDisabled?: boolean;
   onSend: (text: string) => void;
   onDirectiveResponse?: (component: string, value: unknown) => void;
   domain?: Domain;
 }) {
+  const disabled = isLoading || inputDisabled === true;
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -31,36 +81,22 @@ export default function ChatPane({
 
   function handleSend() {
     const text = input.trim();
-    if (!text || isLoading) return;
+    if (!text || disabled) return;
     setInput("");
     onSend(text);
   }
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
-      {/* Message list */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
         {messages.map((msg, i) => (
-          <div key={i}>
-            <div
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div
-                className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                  msg.role === "user"
-                    ? "bg-indigo-600 text-white rounded-br-sm"
-                    : "bg-gray-100 text-gray-900 rounded-bl-sm"
-                }`}
-              >
-                {msg.role === "user" ? (
-                  <span className="whitespace-pre-wrap">{msg.content}</span>
-                ) : (
-                  <MathText>{msg.content}</MathText>
-                )}
-              </div>
-            </div>
+          <div key={i} className="space-y-3">
+            {msg.role === "user" ? (
+              <UserMessage>{msg.content}</UserMessage>
+            ) : (
+              <AssistantMessage>{msg.content}</AssistantMessage>
+            )}
 
-            {/* Inline directives below the last assistant message */}
             {msg.role === "assistant" &&
               msg.directives
                 ?.filter((d) => d.placement === "inline")
@@ -69,7 +105,7 @@ export default function ChatPane({
                   const Component = lookup(key);
                   if (!Component) return null;
                   return (
-                    <div key={j} className="mt-2 ml-2">
+                    <div key={j} className="pl-4 mt-1">
                       <Component
                         {...d.props}
                         onSelect={(value: unknown) =>
@@ -84,39 +120,60 @@ export default function ChatPane({
         ))}
 
         {isLoading && (
-          <div className="flex justify-start">
-            <div className="bg-gray-100 rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm text-gray-400 italic">
-              Thinking…
-            </div>
+          <div className="pl-4 border-l-2 border-rule space-y-1.5">
+            <p className="text-label text-ink-faint">Tutor</p>
+            <BreathingDots />
           </div>
         )}
 
         <div ref={bottomRef} />
       </div>
 
-      {/* Input bar */}
-      <div className="border-t bg-white px-4 py-3 flex gap-2 items-end">
-        <textarea
-          className="flex-1 resize-none border rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 leading-relaxed"
-          rows={2}
-          placeholder="Type your answer… (Enter to send, Shift+Enter for newline)"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          disabled={isLoading}
-        />
-        <button
-          onClick={handleSend}
-          disabled={isLoading || !input.trim()}
-          className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-medium disabled:opacity-40 hover:bg-indigo-700 transition-colors shrink-0"
-        >
-          Send
-        </button>
+      <div className="border-t border-rule bg-paper px-6 py-3">
+        {inputDisabled && !isLoading && (
+          <p className="text-caption text-ink-faint italic mb-2">
+            Answer the question above to continue.
+          </p>
+        )}
+        <div className="flex gap-3 items-end">
+          <div className="flex-1 relative">
+            <textarea
+              className="w-full resize-none bg-transparent border-0 border-b border-rule px-0 py-2 pr-12 text-body text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none leading-relaxed transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              rows={2}
+              placeholder={
+                inputDisabled
+                  ? "Pick an option above…"
+                  : "Type your answer…"
+              }
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              disabled={disabled}
+            />
+            <span
+              className="absolute right-1 bottom-3 inline-flex items-center gap-1 text-caption text-ink-faint pointer-events-none"
+              aria-hidden
+            >
+              <CornerDownLeft size={11} strokeWidth={1.8} />
+              to send
+            </span>
+          </div>
+          <motion.button
+            onClick={handleSend}
+            disabled={disabled || !input.trim()}
+            whileTap={{ scale: 0.94 }}
+            transition={{ duration: 0.12 }}
+            aria-label="Send message"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-md bg-accent text-white disabled:opacity-30 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
+          >
+            <Send size={16} strokeWidth={1.8} />
+          </motion.button>
+        </div>
       </div>
     </div>
   );

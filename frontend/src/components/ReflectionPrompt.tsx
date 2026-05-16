@@ -1,3 +1,5 @@
+import { motion } from "framer-motion";
+import { Eye } from "lucide-react";
 import MathText from "./MathText";
 
 const TRIGGER_LABEL: Record<string, string> = {
@@ -20,19 +22,30 @@ export default function ReflectionPrompt({
   const label = TRIGGER_LABEL[trigger] ?? "Reflect";
 
   return (
-    <div
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
       data-testid="reflection-prompt"
-      className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm"
+      className="bg-surface border border-rule rounded-md p-5 relative overflow-hidden shadow-sm"
     >
-      <p className="text-[11px] font-semibold text-amber-600 uppercase tracking-wide mb-1.5">
-        {label}
-      </p>
-      <p className="text-amber-900 leading-snug">
-        <MathText inline>{question}</MathText>
-      </p>
-      <p className="text-xs text-amber-500 mt-2 italic">
-        Type your answer in the chat below
-      </p>
-    </div>
+      <span
+        className="absolute left-0 top-0 bottom-0 w-1.5 bg-hint"
+        aria-hidden
+      />
+      <div className="pl-4 space-y-3">
+        <div className="flex items-center gap-2">
+          <Eye size={14} className="text-hint" strokeWidth={1.8} />
+          <p className="text-label text-hint">{label}</p>
+        </div>
+        <p className="font-display text-serif-lede italic text-ink leading-snug">
+          <MathText inline>{question}</MathText>
+        </p>
+        <p className="text-caption text-ink-faint flex items-center gap-1.5">
+          <span className="inline-block w-3 h-px bg-rule" aria-hidden />
+          Type your answer in the chat below
+        </p>
+      </div>
+    </motion.div>
   );
 }
