@@ -335,7 +335,7 @@ def test_chat_rejects_tool_result_without_pending_call(client, fake_openrouter):
 
 def test_persona_create_pending_when_no_file(client, fake_openrouter, tmp_persona_dir):
     fake_openrouter.responses = [_agent_reply("What's your age or school year?")]
-    resp = client.post("/persona/create", json={"username": "alice"})
+    resp = client.post("/persona/create", json={"username": "alice", "confirm": True})
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "pending"
@@ -380,7 +380,7 @@ def test_persona_full_onboarding_writes_stub(client, fake_openrouter, tmp_person
             },
         ),
     ]
-    create = client.post("/persona/create", json={"username": "alice"}).json()
+    create = client.post("/persona/create", json={"username": "alice", "confirm": True}).json()
     sid = create["session_id"]
 
     client.post("/chat", json={"session_id": sid, "message": "I'm in year 10"})

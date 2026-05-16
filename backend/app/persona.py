@@ -149,7 +149,9 @@ def merge_persona_updates(username: str, updates: list[dict]) -> Persona | None:
     return persona
 
 
-def handle_persona_wrap_up(username: str, persona_payload: dict[str, Any]) -> Persona:
+def handle_persona_wrap_up(
+    username: str, persona_payload: dict[str, Any], session_id: str | None = None
+) -> Persona:
     """Build a Persona from the agent's wrap_up payload and write it to disk.
 
     The payload may include any subset of:
@@ -158,6 +160,9 @@ def handle_persona_wrap_up(username: str, persona_payload: dict[str, Any]) -> Pe
     The persona prompt currently only emits age_band, school_level,
     initial_intent (the 2-turn intake produces a stub). All other fields
     accumulate post-onboarding via merge_persona_updates.
+
+    session_id: if provided, the completed onboarding session is deleted from
+    the in-memory store to prevent accumulation of stale sessions.
     """
     created_at = persona_payload.get(
         "created_at", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -170,7 +175,8 @@ def handle_persona_wrap_up(username: str, persona_payload: dict[str, Any]) -> Pe
         initial_intent=persona_payload.get("initial_intent"),
     )
     save_persona(persona)
-    # Cleanup the onboarding session since it's no longer needed.
+    if session_id is not None:
+        session_mod.delete(session_id)
     return persona
 
 
@@ -179,6 +185,7 @@ def handle_persona_wrap_up(username: str, persona_payload: dict[str, Any]) -> Pe
 
 class PersonaCreateRequest(BaseModel):
     username: str
+    confirm: bool = False
 
 
 class PersonaCreateResponse(BaseModel):
@@ -203,6 +210,10 @@ async def persona_create(req: PersonaCreateRequest) -> PersonaCreateResponse:
     existing = load_persona(req.username)
     if existing is not None:
         return PersonaCreateResponse(status="exists", persona=existing)
+
+    # New user: require explicit confirmation to avoid creating an account for a typo.
+    if not req.confirm:
+        return PersonaCreateResponse(status="confirm_new")
 
     # Create a persona-domain session and run the opening turn.
     session = Session(
