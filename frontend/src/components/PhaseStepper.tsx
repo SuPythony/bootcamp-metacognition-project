@@ -27,6 +27,9 @@ const PHASES: Array<{ key: Phase; label: string; description: string }> = [
 type StepState = "pending" | "active" | "done";
 
 function stateForIndex(activeIndex: number, i: number): StepState {
+  // activeIndex === -1 means the phase wasn't recognised. Render everything
+  // as pending — no false "Clarify is active" highlight.
+  if (activeIndex < 0) return "pending";
   if (i < activeIndex) return "done";
   if (i === activeIndex) return "active";
   return "pending";
@@ -51,7 +54,7 @@ export default function PhaseStepper({
       aria-label="Session phase"
     >
       {PHASES.map((p, i) => {
-        const state = stateForIndex(activeIndex < 0 ? 0 : activeIndex, i);
+        const state = stateForIndex(activeIndex, i);
         return (
           <li
             key={p.key}

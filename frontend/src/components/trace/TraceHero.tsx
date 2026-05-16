@@ -112,6 +112,9 @@ function Diptych({ trace }: { trace: ThinkingTrace }) {
 }
 
 function DeltaChip({ label }: { label: ThinkingTrace["understanding_delta_label"] }) {
+  // Backend may return null/unknown labels on summariser failure. Skip the
+  // chip rather than render an "undefined" classname.
+  if (!label || !(label in DELTA_TEXT)) return null;
   return (
     <motion.span
       initial={{ scale: 0.6, opacity: 0 }}

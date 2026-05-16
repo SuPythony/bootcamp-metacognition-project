@@ -5,6 +5,15 @@ interface Step {
   rule: string;
 }
 
+// Strip leading/trailing $ if the backend already wrapped the expression,
+// then escape any inner $ so the outer $...$ delimiters remain balanced.
+// (sympy.latex() output should never contain raw $, but defend against it.)
+export function wrapInlineMath(expr: string): string {
+  const trimmed = expr.replace(/^\$+|\$+$/g, "");
+  const escaped = trimmed.replace(/\$/g, "\\$");
+  return `$${escaped}$`;
+}
+
 export default function AlgebraSteps({
   steps,
   final,
@@ -21,7 +30,7 @@ export default function AlgebraSteps({
               {i + 1}.
             </span>
             <span className="text-ink">
-              <MathText inline>{`$${s.expr}$`}</MathText>
+              <MathText inline>{wrapInlineMath(s.expr)}</MathText>
             </span>
             <span className="font-display text-caption italic text-ink-soft shrink-0">
               {s.rule}
@@ -32,7 +41,7 @@ export default function AlgebraSteps({
       <div className="mt-3 pt-3 border-t border-rule grid grid-cols-[20px_1fr_auto] items-baseline gap-3">
         <span className="font-mono text-mono text-accent text-right">∴</span>
         <span className="text-body-emphasis text-ink">
-          <MathText inline>{`$${final}$`}</MathText>
+          <MathText inline>{wrapInlineMath(final)}</MathText>
         </span>
         <span className="text-label text-accent">final</span>
       </div>
