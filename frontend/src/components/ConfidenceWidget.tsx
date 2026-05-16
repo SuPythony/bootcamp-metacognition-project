@@ -12,8 +12,8 @@ export default function ConfidenceWidget({
   onSelect: (value: 1 | 2 | 3 | 4 | 5) => void;
 }) {
   return (
-    <div data-testid="confidence-widget" className="space-y-2">
-      <p className="text-sm font-medium text-gray-700">
+    <div data-testid="confidence-widget" className="space-y-2.5">
+      <p className="text-body-emphasis text-ink">
         How confident are you in this solution?
       </p>
       <div className="flex gap-2">
@@ -21,10 +21,11 @@ export default function ConfidenceWidget({
           <button
             key={n}
             onClick={() => onSelect(n)}
-            className="flex flex-col items-center gap-1 px-3 py-2 border rounded-lg hover:bg-indigo-50 hover:border-indigo-400 transition-colors"
+            aria-label={LABELS[n]}
+            className="flex flex-col items-center gap-1 px-3 py-2 border border-rule bg-paper rounded-md hover:border-accent hover:bg-accent-soft transition-colors"
           >
-            <span className="text-sm font-semibold">{n}</span>
-            <span className="text-[10px] text-gray-400 w-14 text-center leading-tight">
+            <span className="text-body-emphasis text-ink">{n}</span>
+            <span className="text-[10px] text-ink-faint w-14 text-center leading-tight">
               {LABELS[n]}
             </span>
           </button>

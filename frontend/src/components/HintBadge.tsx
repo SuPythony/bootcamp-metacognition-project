@@ -3,7 +3,8 @@ export default function HintBadge({ count }: { count: number }) {
   return (
     <span
       data-testid="hint-badge"
-      className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold bg-amber-100 text-amber-700 rounded-full"
+      className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-semibold bg-hint/15 text-hint rounded-full"
+      aria-label={`${count} hint${count !== 1 ? "s" : ""} used`}
     >
       {count}
     </span>

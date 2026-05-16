@@ -1,0 +1,40 @@
+:root {
+  --color-paper: 251 248 242;
+  --color-surface: 255 255 255;
+  --color-surface-muted: 242 237 226;
+  --color-ink: 26 26 26;
+  --color-ink-soft: 74 71 66;
+  --color-ink-faint: 139 133 122;
+  --color-rule: 229 223 208;
+  --color-accent: 107 45 92;
+  --color-accent-soft: 244 232 239;
+  --color-solved: 92 122 82;
+  --color-hint: 168 107 31;
+  --color-calibrate: 63 91 122;
+  --color-alarm: 163 60 42;
+
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --focus-ring: 0 0 0 2px rgb(var(--color-paper)), 0 0 0 4px rgb(var(--color-accent));
+}
+
+.dark {
+  --color-paper: 20 19 15;
+  --color-surface: 28 27 23;
+  --color-surface-muted: 38 36 31;
+  --color-ink: 237 234 224;
+  --color-ink-soft: 184 179 166;
+  --color-ink-faint: 110 106 96;
+  --color-rule: 47 44 37;
+  --color-accent: 197 123 177;
+  --color-accent-soft: 58 31 51;
+  --color-solved: 166 195 154;
+  --color-hint: 224 178 111;
+  --color-calibrate: 143 176 209;
+  --color-alarm: 224 132 113;
+}
+
+*:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 4px;
+}
