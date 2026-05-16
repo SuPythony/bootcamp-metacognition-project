@@ -1,9 +1,13 @@
 import { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
-import { CornerDownLeft, Send } from "lucide-react";
+import { CornerDownLeft, Send, X } from "lucide-react";
 import MathText from "./MathText";
 import type { UIDirective, Domain } from "../api/types";
 import { lookup } from "../specializations/registry";
+
+function directiveKey(d: UIDirective): string {
+  return `${d.placement}::${d.component}::${JSON.stringify(d.props)}`;
+}
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -62,6 +66,7 @@ export default function ChatPane({
   inputDisabled,
   onSend,
   onDirectiveResponse,
+  onDismissDirective,
   domain,
 }: {
   messages: ChatMessage[];
@@ -69,6 +74,7 @@ export default function ChatPane({
   inputDisabled?: boolean;
   onSend: (text: string) => void;
   onDirectiveResponse?: (component: string, value: unknown) => void;
+  onDismissDirective?: (key: string) => void;
   domain?: Domain;
 }) {
   const disabled = isLoading || inputDisabled === true;
@@ -112,8 +118,19 @@ export default function ChatPane({
                   const key = `${d.domain}.${d.component}`;
                   const Component = lookup(key);
                   if (!Component) return null;
+                  const dKey = directiveKey(d);
                   return (
-                    <div key={j} className="pl-4 mt-1">
+                    <div key={`${j}-${dKey}`} className="pl-4 mt-1 relative group">
+                      {onDismissDirective && (
+                        <button
+                          type="button"
+                          onClick={() => onDismissDirective(dKey)}
+                          aria-label="Dismiss prompt"
+                          className="absolute top-1 right-1 z-10 inline-flex h-5 w-5 items-center justify-center rounded-md text-ink-faint hover:text-ink hover:bg-surface-muted opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                        >
+                          <X size={12} strokeWidth={1.8} />
+                        </button>
+                      )}
                       <Component
                         {...d.props}
                         onSelect={(value: unknown) =>

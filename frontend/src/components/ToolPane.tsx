@@ -1,16 +1,23 @@
+import { X } from "lucide-react";
 import type { UIDirective, ToolCall, Domain } from "../api/types";
 import { lookup } from "../specializations/registry";
+
+function directiveKey(d: UIDirective): string {
+  return `${d.placement}::${d.component}::${JSON.stringify(d.props)}`;
+}
 
 export default function ToolPane({
   directives,
   toolResults,
   domain,
   onDirectiveResponse,
+  onDismissDirective,
 }: {
   directives: UIDirective[];
   toolResults: ToolCall[];
   domain?: Domain;
   onDirectiveResponse?: (component: string, value: unknown) => void;
+  onDismissDirective?: (key: string) => void;
 }) {
   const sidePanelItems = directives.filter((d) => d.placement === "side_panel");
   const hasContent = sidePanelItems.length > 0 || toolResults.length > 0;
@@ -45,6 +52,7 @@ export default function ToolPane({
 
         {sidePanelItems.map((d, i) => {
           const Component = lookup(`${d.domain}.${d.component}`);
+          const dKey = directiveKey(d);
           if (!Component) {
             return (
               <div key={`d-${i}`} className="text-caption text-ink-faint p-2">
@@ -53,7 +61,17 @@ export default function ToolPane({
             );
           }
           return (
-            <div key={`d-${i}`} className="rounded-md border border-rule bg-paper p-3">
+            <div key={`d-${i}-${dKey}`} className="rounded-md border border-rule bg-paper p-3 relative group">
+              {onDismissDirective && (
+                <button
+                  type="button"
+                  onClick={() => onDismissDirective(dKey)}
+                  aria-label="Dismiss prompt"
+                  className="absolute top-1 right-1 z-10 inline-flex h-5 w-5 items-center justify-center rounded-md text-ink-faint hover:text-ink hover:bg-surface-muted opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                >
+                  <X size={12} strokeWidth={1.8} />
+                </button>
+              )}
               <Component
                 {...d.props}
                 onSelect={(value: unknown) =>

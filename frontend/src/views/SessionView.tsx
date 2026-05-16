@@ -21,6 +21,32 @@ export const INTERACTIVE_DIRECTIVES = new Set([
   "RuleRecallPrompt",
 ]);
 
+const VALID_LIFETIMES = new Set<UIDirective["lifetime"]>([
+  "until_dismissed",
+  "until_next_turn",
+  "persistent_in_subproblem",
+]);
+
+// Normalize unknown / missing lifetime values to until_next_turn so the
+// directive is guaranteed to be cleared on the next student turn rather than
+// sticking around forever.
+export function normalizeDirective(d: UIDirective): UIDirective {
+  if (VALID_LIFETIMES.has(d.lifetime)) return d;
+  return { ...d, lifetime: "until_next_turn" };
+}
+
+// Stable string key for a directive — used to identify dismissed instances
+// (UIDirective has no server-assigned id field).
+export function directiveKey(d: UIDirective): string {
+  return `${d.placement}::${d.component}::${JSON.stringify(d.props)}`;
+}
+
+// Active subproblem id, or null. Used to detect transitions so we can clear
+// persistent_in_subproblem directives when the focus changes.
+export function getActiveSubproblemId(subproblems: Subproblem[]): string | null {
+  return subproblems.find((s) => s.status === "active")?.id ?? null;
+}
+
 // Pure helper: merge new side-panel directives into an existing list,
 // dropping duplicates of (component, props). Prevents the panel from growing
 // unbounded when the agent re-emits the same directive every turn.
@@ -105,9 +131,10 @@ export default function SessionView({
       if (directiveResponse) req.directive_response = directiveResponse;
       const res = await api.chat(req);
 
-      const inlineDirectives = res.ui_directives?.filter((d) => d.placement === "inline") ?? [];
-      const sidePanelNew = res.ui_directives?.filter((d) => d.placement === "side_panel") ?? [];
-      const modalNew = res.ui_directives?.filter((d) => d.placement === "modal") ?? [];
+      const allDirectives = (res.ui_directives ?? []).map(normalizeDirective);
+      const inlineDirectives = allDirectives.filter((d) => d.placement === "inline");
+      const sidePanelNew = allDirectives.filter((d) => d.placement === "side_panel");
+      const modalNew = allDirectives.filter((d) => d.placement === "modal");
 
       // Skip empty assistant messages (backend sends reply: null on tool-only turns).
       // Still push if there are inline directives to render.
@@ -153,6 +180,50 @@ export default function SessionView({
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     send(text);
   }
+
+  function handleDismissDirective(key: string) {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.role === "assistant" && m.directives
+          ? {
+              ...m,
+              directives: m.directives.filter((d) => directiveKey(d) !== key),
+            }
+          : m,
+      ),
+    );
+    setSidePanelDirectives((prev) =>
+      prev.filter((d) => directiveKey(d) !== key),
+    );
+  }
+
+  // Clear persistent_in_subproblem directives when the active subproblem
+  // changes. Tracked by ref so we don't fire on the initial render.
+  const lastActiveSpRef = useRef<string | null>(null);
+  useEffect(() => {
+    const active = getActiveSubproblemId(subproblems);
+    if (active !== lastActiveSpRef.current) {
+      const prevActive = lastActiveSpRef.current;
+      lastActiveSpRef.current = active;
+      if (prevActive !== null) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.role === "assistant" && m.directives
+              ? {
+                  ...m,
+                  directives: m.directives.filter(
+                    (d) => d.lifetime !== "persistent_in_subproblem",
+                  ),
+                }
+              : m,
+          ),
+        );
+        setSidePanelDirectives((prev) =>
+          prev.filter((d) => d.lifetime !== "persistent_in_subproblem"),
+        );
+      }
+    }
+  }, [subproblems]);
 
   function formatDirectiveValue(component: string, value: unknown): string {
     if (component === "CalibrationCheck" && typeof value === "number") {
@@ -303,6 +374,7 @@ export default function SessionView({
             inputDisabled={awaitingDirective}
             onSend={handleSend}
             onDirectiveResponse={handleDirectiveResponse}
+            onDismissDirective={handleDismissDirective}
             domain={domain}
           />
         </div>
@@ -317,6 +389,7 @@ export default function SessionView({
         toolResults={toolResults}
         domain={domain}
         onDirectiveResponse={handleDirectiveResponse}
+        onDismissDirective={handleDismissDirective}
       />
 
       {/* Modal overlay — only mount if the component is registered */}
