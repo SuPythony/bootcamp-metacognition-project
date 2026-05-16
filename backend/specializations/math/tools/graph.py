@@ -59,8 +59,17 @@ def run(args: dict, session: Any) -> dict:
     variables: dict = args.get("variables") or {}
     caption: str = str(args.get("caption") or "").strip()
 
-    if len(x_range) != 2 or x_range[0] >= x_range[1]:
-        return _error("x_range must be [min, max] with min < max")
+    if len(x_range) != 2:
+        return _error("x_range must be [min, max]")
+    try:
+        xlo, xhi = float(x_range[0]), float(x_range[1])
+    except (TypeError, ValueError):
+        return _error("x_range values must be numbers")
+    import math as _math
+    if not (_math.isfinite(xlo) and _math.isfinite(xhi)):
+        return _error("x_range values must be finite numbers")
+    if xlo >= xhi:
+        return _error("x_range must satisfy min < max")
 
     try:
         image_url, auto_caption = _render(expressions, x_range, variables)
@@ -102,6 +111,15 @@ def _eval_expr(expression: str, x_vals: np.ndarray, variables: dict) -> np.ndarr
     # Constants (e.g. y=7) return a scalar — broadcast to match x_vals shape.
     y_vals = np.broadcast_to(np.asarray(raw, dtype=complex), x_vals.shape).copy()
     real_mask = np.isreal(y_vals)
+    complex_fraction = (~real_mask).sum() / max(len(y_vals), 1)
+    if complex_fraction > 0.1:
+        import logging as _logging
+        _logging.getLogger("app.tools.graph").warning(
+            "Expression '%s' produces complex values for %.0f%% of the range; "
+            "plotting real part only.",
+            expression,
+            complex_fraction * 100,
+        )
     y_plot = np.where(real_mask, y_vals.real, np.nan)
     return np.where(np.abs(y_plot) > _Y_CLIP, np.nan, y_plot)
 
@@ -112,7 +130,9 @@ def _render(
     variables: dict,
 ) -> tuple[str, str]:
     """Plot one or more expressions over x_range, return (data-URL, auto_caption)."""
-    x_vals = np.linspace(float(x_range[0]), float(x_range[1]), 500)
+    span = abs(float(x_range[1]) - float(x_range[0]))
+    n_points = max(500, min(2000, int(span * 50)))
+    x_vals = np.linspace(float(x_range[0]), float(x_range[1]), n_points)
     curves = [(expr, _eval_expr(expr, x_vals, variables)) for expr in expressions]
     auto_caption = _caption(expressions, variables)
     image_url = _fig_to_dataurl(x_vals, curves, auto_caption, x_range)

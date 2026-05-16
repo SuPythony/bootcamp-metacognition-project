@@ -227,9 +227,18 @@ class Session(BaseModel):
             "active_subproblem": self.active_subproblem_id,
             "current_hint_level": self.current_hint_level(),
             "subproblems": [
-                {"id": s.id, "description": s.description, "status": s.status}
+                {
+                    "id": s.id,
+                    "description": s.description,
+                    "goal": s.goal,
+                    "status": s.status,
+                    "hints_given": s.hints_given,
+                    "direct_answer_requested": s.direct_answer_requested,
+                }
                 for s in self.subproblems
             ],
+            "self_corrections": self.metrics.self_corrections,
+            "turns_total": self.metrics.turns_total,
             "initial_understanding": self.initial_understanding,
             "refined_query": self.refined_query,
             "concepts_established": self.concepts_established,

@@ -204,6 +204,10 @@ def dispatch_tool(
             f"Backend tool {domain}.{tool_name} does not export a run() function"
         )
     result = module.run(args, session)
+    if not isinstance(result, dict) or "result" not in result:
+        raise RuntimeError(
+            f"Tool {domain}.{tool_name} run() must return a dict with a 'result' key; got {type(result).__name__}"
+        )
     return {
         "execution": "backend",
         "name": tool_name,

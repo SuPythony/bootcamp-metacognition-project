@@ -9,7 +9,8 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-load_dotenv()  # loads backend/.env (or any .env on sys.path) before routes read os.environ
+if load_dotenv():  # loads backend/.env (or any .env on sys.path) before routes read os.environ
+    print("Loaded backend/.env")
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import plugin_registry
