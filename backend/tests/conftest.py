@@ -87,6 +87,19 @@ def fake_openrouter(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("LLM_MODEL_TUTOR", "test/tutor-model")
     monkeypatch.setenv("LLM_MODEL_CLASSIFIER", "test/classifier-model")
+
+    # By default, the initial-understanding summariser is a no-op in tests so
+    # existing fixtures don't need to queue an extra response on every
+    # clarification exit. Tests that exercise it explicitly override this
+    # monkeypatch.
+    async def _noop_initial_summarizer(*, clarification_student_messages, session_id):
+        return None
+
+    monkeypatch.setattr(
+        llm_mod,
+        "call_initial_understanding_summarizer",
+        _noop_initial_summarizer,
+    )
     return rec
 
 

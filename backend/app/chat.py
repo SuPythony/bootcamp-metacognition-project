@@ -697,9 +697,11 @@ async def session_new(req: SessionNewRequest) -> SessionNewResponse:
     session.metrics.token_usage.add(cls_usage)  # count classifier call in session total
 
     parsed, _, _ = await _run_chat_turn(session)
+    previous_phase = session.phase
     session.phase = _validate_phase(session, parsed.control.phase)
     _apply_agent_response(session, parsed)
     session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
+    await _maybe_capture_initial_understanding(session, previous_phase)
     session_mod.put(session)
 
     return SessionNewResponse(
@@ -710,7 +712,35 @@ async def session_new(req: SessionNewRequest) -> SessionNewResponse:
     )
 
 
-def _finalize_turn(
+async def _maybe_capture_initial_understanding(
+    session: Session, previous_phase: Phase
+) -> None:
+    """If the session has just left clarification for the first time, synthesise
+    initial_understanding from its clarification-phase student messages.
+
+    Idempotent: a non-None initial_understanding is never overwritten, so
+    re-entries (phase clamps, replays) don't trigger a second call.
+    """
+    if session.initial_understanding is not None:
+        return
+    if previous_phase != "clarification" or session.phase == "clarification":
+        return
+    clarification_msgs = [
+        m["content"]
+        for m in session.message_history
+        if m.get("role") == "user" and not m["content"].startswith("[SYSTEM]")
+    ]
+    if not clarification_msgs:
+        return
+    summary = await llm.call_initial_understanding_summarizer(
+        clarification_student_messages=clarification_msgs,
+        session_id=session.session_id,
+    )
+    if summary:
+        session.initial_understanding = summary
+
+
+async def _finalize_turn(
     session: Session,
     req: ChatRequest,
     parsed: AgentResponse,
@@ -732,10 +762,13 @@ def _finalize_turn(
         )
         parsed.control.phase = None
 
+    previous_phase = session.phase
     session.phase = _validate_phase(session, parsed.control.phase)
     parsed.control.hint_level = _clamp_hint_level(session, parsed.control.hint_level)
     _apply_agent_response(session, parsed)
     session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
+
+    await _maybe_capture_initial_understanding(session, previous_phase)
 
     onboarding_complete = False
     if session.domain == "persona" and session.phase == "wrap_up":
@@ -906,7 +939,7 @@ async def _chat_sse_generator(
 
         frontend_tool = session.pending_frontend_tool if hasattr(session, "pending_frontend_tool") and session.pending_frontend_tool else None
 
-        chat_response = _finalize_turn(session, req, parsed, frontend_tool, last_backend_tool_result)
+        chat_response = await _finalize_turn(session, req, parsed, frontend_tool, last_backend_tool_result)
         yield _sse("state", chat_response.model_dump())
 
     except HTTPException as exc:
@@ -998,7 +1031,7 @@ async def chat(req: ChatRequest, request: Request):
     parsed, frontend_tool, backend_tool_result = await _run_chat_turn(
         session, had_tool_result=had_tool_result
     )
-    return _finalize_turn(session, req, parsed, frontend_tool, backend_tool_result)
+    return await _finalize_turn(session, req, parsed, frontend_tool, backend_tool_result)
 
 
 class ToolDispatchRequest(BaseModel):

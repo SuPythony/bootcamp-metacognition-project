@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-**Frontend and backend core loop are fully implemented and running end-to-end.** The Socratic chat loop works in production (OpenRouter → Gemini 2.5 Flash), phase transitions are validated, the subproblem panel updates live, the thinking trace renders at wrap-up, LaTeX renders throughout, the algebra tool works, and CalibrationCheck/ReflectionPrompt widgets render inline in real-LLM mode. Mock mode (`VITE_USE_MOCK=true`) runs a scripted 7-turn conversation without any API calls. Persona onboarding now routes through a real chat session end-to-end. Science tools (graph, data_table) are fully implemented. Domain prompts for programming, essay, and science are substantially expanded. The thinking-trace endpoint now computes `final_understanding` via a lightweight LLM summariser call.
+**Frontend and backend core loop are fully implemented and running end-to-end.** The Socratic chat loop works in production (OpenRouter → Gemini 2.5 Flash), phase transitions are validated, the subproblem panel updates live, the thinking trace renders at wrap-up, LaTeX renders throughout, the algebra tool works, and CalibrationCheck/ReflectionPrompt widgets render inline in real-LLM mode. Mock mode (`VITE_USE_MOCK=true`) runs a scripted 7-turn conversation without any API calls. Persona onboarding now routes through a real chat session end-to-end. Science tools (graph, data_table) are fully implemented. Domain prompts for programming, essay, and science are substantially expanded. The thinking-trace endpoint now computes both `initial_understanding` (captured at clarification exit) and `final_understanding` (synthesised at wrap-up) via lightweight LLM summariser calls, so the wrap-up diptych and delta chip render with real data.
 
 ### What is real and working
 
@@ -22,6 +22,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Probe suite** — `backend/tests/probes.py` defines 17 probes covering Socratic discipline constraints (direct answer refusal, escape hatch, subproblem enumeration, JSON schema, one-question-per-turn, no code written, no essay drafted), schema compliance, Pólya heuristic application, and domain-specific rules (`programming_pseudocode_first`, `math_tool_before_answer`, `essay_claim_specificity`, `hint_precondition_enforced`, `student_answer_no_reasoning`, `polya_working_backward`, `clarification_uses_thinking`, `essay_counter_argument_engaged`). Assertion helpers include `assert_no_code_written`, `assert_no_inline_algebra`, `assert_claim_pushed`, `assert_hint_level_null_or_zero`, `assert_reply_contains_any`, `assert_no_direct_confirmation`, `assert_thinking_non_empty`, `assert_tool_call_set`. Each probe carries `manual_checks` for human review. Run via `backend/tests/run_probes.py` (no server needed) or as slow pytest tests with `--run-slow`.
 - **Split prompt architecture** — `backend/app/prompts/v1/` holds 8 files assembled per-turn: `core.txt` (always), `phase_{phase}.txt` (one per phase), `block_tool_result.txt` / `block_calibration.txt` / `block_reflection_eval.txt` (conditional on session state). `load_base_prompt(variant_key, session, had_tool_result)` in `variants.py` does the assembly. `chat.py` calls it every turn with the live session object; probes pass a minimal `_PhaseStub`. Domain prompts (`specializations/{domain}/prompt.txt`) are concatenated after the base.
 - **Prompt variant system** — `backend/app/prompts/variants.py` maps string keys to prompt sources. Base variants (`base:v1`, etc.) map to **folders**; domain variants (`math:v1`, etc.) map to flat files. `load_base_prompt(variant_key, session)` is used in `chat.py`; `load_combined(domain)` (probes/tests only, no live session) calls `load_base_prompt(session=None)` returning `core.txt` only. Server-run variant is set via `PROMPT_VARIANT_BASE` / `PROMPT_VARIANT_DOMAIN` env vars.
+- **Initial-understanding capture** — `session.initial_understanding` is populated automatically at the clarification → next-phase transition by `_maybe_capture_initial_understanding` in `chat.py`. The helper calls `llm.call_initial_understanding_summarizer` (cheap classifier model) over the session's clarification-phase student messages and stores the returned one-sentence summary. Idempotent — once set, the field is never overwritten on re-entries. Logged as `llm_initial_summarizer` / `llm_initial_summarizer_error` events. There is no `signal.initial_understanding` field; capture is deterministic backend-side and does not rely on the agent emitting anything (mirrors how `final_understanding` is built at wrap-up, avoiding the dormant-signal failure mode that affected `emit_reflection`).
+- **Summariser tone** — `call_summarizer`'s system prompt addresses the student in second person ("You came to see…", "You moved from … to …") and explicitly forbids graded language ("fragmented", "incomplete", "partial", "shallow"). Same constraints apply to `call_initial_understanding_summarizer`. Tested via `test_call_summarizer_system_prompt_enforces_tone` — if a future edit drops the constraints, the test fails immediately.
 
 ### What is still a stub
 
@@ -29,11 +31,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Seeded dialogue tests** — `backend/tests/test_socratic_constraints.py` has assertion helpers and probe-backed slow tests, but no deterministic seeded dialogue test cases (canned turn sequences with hardcoded LLM replies). The probe suite covers live-LLM regression; seeded dialogues would give a fast, deterministic gate (see Priority 4).
 - **EC2 deploy** — not yet deployed; nginx + systemd setup documented below but not executed.
 - **Critique Mode** — designed and prompt-drafted (`critic_base.txt`) but deferred to v1.1.
-- **Wrap-up / reflection rendering** — `ThinkingTraceDrawer` now renders calibration and reflection sections, but the data is often empty in practice: the agent rarely emits `emit_reflection` or `emit_calibration_check` in real sessions due to prompt gaps. The UI is wired; the prompt needs tuning to actually trigger these flows.
+- **Calibration & reflection signals still dormant** — `ThinkingTraceDrawer` renders Calibration and Reflection sections, but in real sessions the agent rarely emits `emit_reflection` or `emit_calibration_check`, so the sections are mostly empty. The UI is wired; the prompt needs tuning to actually trigger these flows. (Note: the `initial_understanding` / understanding-delta rendering, which was previously affected by the same kind of dormancy at the *backend* level, is now solved by deterministic backend capture — see the "Initial-understanding capture" entry above. Reflection/calibration require a similar fix on the *prompt* side.)
 
 ### Next milestones (in order)
 
-1. Fix wrap-up/reflection rendering: tune prompts so the agent reliably emits calibration and reflection signals
+1. Fix calibration/reflection emission: tune prompts so the agent reliably emits the signals (or move to deterministic backend capture, as was done for `initial_understanding`)
 2. Implement SSE streaming in `stream_tutor()` and wire it into the frontend ChatPane
 3. Add seeded dialogue test cases to `test_socratic_constraints.py`
 4. Deploy to EC2
@@ -74,6 +76,21 @@ The following were fixed/implemented in the `prompt-upgrade` milestone (P0–P4 
 - **Known gap**: these sections are empty in real sessions because the agent rarely emits the required signals. Prompt tuning needed.
 
 **126 fast tests pass** (was 115 before the prompt-upgrade milestone; +5 from 17-probe harness expansion).
+
+**T1 (initial-understanding capture + summariser tone — 2026-05-17)**
+
+Fixes the wrap-up "Thinking Trace" diptych: the left-hand "I started thinking…" card, the arrow, and the delta chip never rendered because `session.initial_understanding` was never written. Symptom in the UI was a single right-hand "I ended up here." card with no comparison anchor.
+
+- **Backend capture** — new `_maybe_capture_initial_understanding(session, previous_phase)` in `chat.py` fires at the clarification → next-phase transition (both in `_finalize_turn` and `/session/new`). Idempotent via a `session.initial_understanding is None` guard, so phase clamps don't re-summarise. The capture is deterministic backend-side — it does NOT depend on the agent emitting any signal (sidesteps the same dormancy that still affects `emit_reflection` / `emit_calibration_check`).
+- **New summariser** — `call_initial_understanding_summarizer(clarification_student_messages, session_id)` in `llm.py`, mirror of `call_summarizer` plumbing. Cheap classifier model, JSON-object response, fence-stripping, `llm_initial_summarizer` / `llm_initial_summarizer_error` log events, safe `None` fallback on empty input or parse failure.
+- **Summariser tone rewrite** — `call_summarizer`'s system prompt rewritten to address the student in second person and forbid graded language ("fragmented", "incomplete", "partial", "shallow"). Replaces the original clinical third-person ("The student understands…") which was rendering as a teacher's report rather than a reflection mirror.
+- **`_finalize_turn` is now `async`** — required because the capture call awaits the summariser. Both call sites (`_chat_sse_generator` and the JSON-path `/chat` handler) updated with `await`.
+- **No frontend changes** — `TraceHero.tsx` already gated the diptych on `hasInitial && hasFinal` and already declared all four fields in `ThinkingTrace`. Backend populating the field is enough to make the diptych render.
+- **Conftest stub for tests** — `fake_openrouter` fixture now monkeypatches `call_initial_understanding_summarizer` to a no-op by default, so existing chat-flow tests don't have to queue an extra LLM response on every clarification exit. Tests that exercise the real capture (in `test_chat_flow.py`) or the real summariser (in `test_llm_client.py`) opt back in with their own monkeypatch.
+- **9 new fast tests** — 4 in `test_chat_flow.py` (captures on clarification exit, idempotency, no-fire when still in clarification, thinking-trace surfaces captured value) + 5 in `test_llm_client.py` (happy path, empty input → None, parse failure → None, missing key → None, tone-constraint regression guard).
+- **Open: 2 probe failures** — see `PROMPT_ISSUES.md` entries P11.1 (`math_tool_before_answer` — tutor prefers conceptual hint over algebra tool invocation) and P11.2 (`essay_counter_argument_engaged` — assertion phrasing too narrow for valid replies). Neither is a regression from this work; both are pre-existing prompt-or-assertion issues surfaced when the suite was re-run after these changes.
+
+**135 fast tests pass** (+9 from T1; was 126).
 
 ---
 
@@ -485,6 +502,37 @@ base + domain. `parse_domain_variants(env_value)` parses the comma-separated `PR
 string into a `dict[domain, variant_key]` — a malformed entry (missing `:`) raises `ValueError` at
 startup rather than silently loading the wrong prompt. Old keys stay registered so historical probe
 runs against past variants remain reproducible.
+
+### Initial-understanding capture (`backend/app/chat.py`)
+
+`session.initial_understanding` is **not** populated from any agent signal — there is no
+`signal.initial_understanding` field. Capture happens server-side in
+`_maybe_capture_initial_understanding(session, previous_phase)`, called from `_finalize_turn`
+and `/session/new` right after `_validate_phase`. The helper:
+
+1. Returns early if `session.initial_understanding` is already non-None (idempotent).
+2. Returns early if the session is still in clarification or never was.
+3. Collects the student's clarification-phase user messages from `session.message_history`.
+4. Awaits `llm.call_initial_understanding_summarizer(...)`, which returns a one-sentence
+   second-person summary (or `None` on parse failure / empty input).
+5. Stores the result on the session.
+
+Because the trigger is deterministic, this surface does NOT suffer from the agent-doesn't-emit
+dormancy that affects `emit_reflection` / `emit_calibration_check`. If/when those signals are
+moved off the agent's hands, this is the pattern to mirror.
+
+### `fake_openrouter` test fixture stubs the initial summariser
+
+`backend/tests/conftest.py`: the `fake_openrouter` fixture monkeypatches
+`llm.call_initial_understanding_summarizer` to a no-op (`return None`) by default. Reason: the
+clarification → next-phase capture would otherwise consume one extra queued LLM response on
+every test that drives a phase transition out of clarification, breaking dozens of existing
+chat-flow tests that queue exactly N responses for N expected calls.
+
+Tests that exercise the real capture (e.g. `test_initial_understanding_captured_on_clarification_exit`)
+override the stub with their own `monkeypatch.setattr`. Tests that exercise the underlying
+function directly (e.g. `test_call_initial_understanding_summarizer_happy_path` in
+`test_llm_client.py`) bypass the fixture entirely and patch `_post_chat` themselves.
 
 ---
 

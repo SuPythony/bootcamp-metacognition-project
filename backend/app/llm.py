@@ -430,12 +430,21 @@ async def call_summarizer(
     student_block = "\n".join(f"- {m}" for m in recent_student_messages[-4:]) or "(none)"
     initial_block = initial_understanding or "(not captured)"
     system = (
-        "You are a concise summariser for an educational thinking trace. "
+        "You are writing a warm, concise wrap-up reflection for a student who just "
+        "finished a Socratic tutoring session. You are speaking TO the student.\n\n"
         "Respond with exactly one JSON object — no prose, no markdown — with these keys:\n"
-        '  "final_understanding": one sentence describing the student\'s current understanding based on their recent messages,\n'
-        '  "delta_label": exactly one of "significant", "moderate", "small" — how much their understanding grew,\n'
-        '  "delta_evidence": one sentence of concrete evidence for the delta label.\n'
-        "Base your answer only on the provided messages."
+        '  "final_understanding": one sentence addressed to the student in second person ("you"), '
+        "describing what they now understand. Start with a verb like \"You came to see\", "
+        "\"You worked out\", \"You can now explain\". Describe what they grasped, not what they missed.\n"
+        '  "delta_label": exactly one of "significant", "moderate", "small" — how much their understanding grew.\n'
+        '  "delta_evidence": one sentence in second person describing the shift, e.g. '
+        "\"You moved from … to …\". Concrete, evidence-based, no judgement.\n\n"
+        "Hard constraints:\n"
+        "- Never use third person (\"the student\"). Always address them as \"you\".\n"
+        "- Never grade. Do not say their understanding is \"fragmented\", \"incomplete\", "
+        "\"partial\", \"shallow\", or that it \"does not show\" something.\n"
+        "- Focus on what they grasped, not on what they missed.\n"
+        "- Base your answer only on the provided messages."
     )
     user = (
         f"Initial understanding: {initial_block}\n\n"
@@ -484,6 +493,76 @@ async def call_summarizer(
             "delta_label": None,
             "delta_evidence": None,
         }
+
+
+async def call_initial_understanding_summarizer(
+    clarification_student_messages: list[str],
+    temperature: float = 0.3,
+    session_id: str = "initial_summarizer",
+) -> str | None:
+    """Synthesise initial_understanding from the student's clarification-phase
+    messages. Mirror of call_summarizer but only produces a single sentence
+    capturing what the student understood at the start of the session.
+
+    Returns the one-sentence string, or None on failure / empty input.
+    """
+    if not clarification_student_messages:
+        return None
+    model = _env("LLM_MODEL_CLASSIFIER")  # cheap model is fine for this task
+    student_block = "\n".join(f"- {m}" for m in clarification_student_messages[-6:])
+    system = (
+        "You are writing a one-sentence opening for a Socratic tutoring "
+        "session's thinking trace. The student has just finished the "
+        "clarification phase — you are summarising what they understood at "
+        "the start, before any guided work happened. You are speaking TO the student.\n\n"
+        "Respond with exactly one JSON object — no prose, no markdown — with this key:\n"
+        '  "initial_understanding": one sentence addressed to the student in second person ("you"). '
+        "Start with \"You came in thinking\", \"You started by\", or \"At the start, you\". "
+        "Capture their starting framing or gut take, even if it was partial or "
+        "\"I have no idea where to start\" — that is still a valid starting point. "
+        "Describe what they brought to the table, not what they were missing.\n\n"
+        "Hard constraints:\n"
+        "- Never use third person (\"the student\"). Always \"you\".\n"
+        "- Never grade. Do not call their starting point \"wrong\", \"incomplete\", "
+        "\"fragmented\", or \"shallow\".\n"
+        "- Base your answer only on the provided messages."
+    )
+    user = f"Student messages during clarification (most recent last):\n{student_block}"
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    call_id = str(uuid.uuid4())
+    t0 = time.monotonic()
+    try:
+        response = await _post_chat(
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=temperature,
+        )
+        usage = _extract_usage(response)
+        content = _strip_fences(_extract_content(response))
+        parsed = json.loads(content)
+        result = str(parsed.get("initial_understanding", "")).strip() or None
+        _write_log({
+            "event": "llm_initial_summarizer",
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "call_id": call_id, "session_id": session_id, "model": model,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+            "input_tokens": usage["prompt_tokens"],
+            "output_tokens": usage["completion_tokens"],
+            "result": result,
+        })
+        return result
+    except Exception as exc:  # noqa: BLE001
+        _write_log({
+            "event": "llm_initial_summarizer_error",
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "call_id": call_id, "session_id": session_id, "model": model,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+            "input_tokens": 0, "output_tokens": 0,
+            "error": str(exc),
+        })
+        logging.getLogger("app.llm").warning("call_initial_understanding_summarizer failed: %s", exc)
+        return None
 
 
 class _ReplyExtractor:
