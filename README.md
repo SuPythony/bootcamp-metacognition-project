@@ -2,6 +2,12 @@
 
 > **The AI never solves the problem. It guides the student to solve it themselves.**
 
+*Aporeka* combines two ideas: **aporia** — the Greek term for the productive
+state of being genuinely stuck, which Socrates deliberately induced in students
+as the precondition for real understanding — and **eureka**, the moment of
+discovery that follows. The name describes the full arc the app is designed to
+create: you arrive confused, you work through it, you find it yourself.
+
 A web-based learning tool for teenagers (roughly 13–18) that strengthens thinking skills which stay valuable in an AI-rich world: framing problems, checking understanding, calibrating confidence, reflecting on mistakes, and judging AI outputs.
 
 Built for the [Metacognition Vibe Coding Task](https://docs.tk.sg/Metacognition-Vibe-Coding-Task-551dd9d8b64483d7942101e280188fdb).
