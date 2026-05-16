@@ -14,10 +14,33 @@ backend question bank for all four trigger types (`periodic`,
 `self_correction`, `escape_hatch`, `wrap_up`) contains placeholder entries
 that don't produce meaningful reflection.
 
+**Root cause (confirmed 2026-05-17 in manual testing):**
+`frontend/src/views/SessionView.tsx:186-188` schedules `onWrapUp` 1.8 s
+after the **first** turn whose phase is `wrap_up` — exactly the turn the
+agent asks the synthesis question on. The student sees the question for a
+beat, then `WrapUpView` replaces the chat before they can answer. The
+designed multi-turn wrap-up dialogue (synthesis Q&A → look-back Q&A →
+closing message, per `phase_wrap_up.txt:35-46`) is collapsed into a single
+unanswered turn. The prompt explicitly says *"The session ends after the
+reflection response is received — not when the synthesis question is
+asked."* — the frontend ignores this.
+
+`ChatResponse` (`chat.py:212-223`) carries no `session_complete` field, so
+the frontend has no way to distinguish "first wrap_up turn" from "wrap_up
+dialogue is finished."
+
 **Actions:**
-- **Frontend:** Do not close the session or transition away from the chat
-  view until `signal.last_reflection_quality` has been received and stored.
-  The SSE connection must stay open through the student's reflection response.
+- **Backend (`chat.py`):** Add a `session_complete: bool` field to
+  `ChatResponse`, set deterministically (NOT via an agent signal — same
+  dormancy risk as `emit_reflection`) when `signal.last_reflection_quality`
+  arrives against a `trigger="wrap_up"` reflection. This is the moment the
+  agent has heard and evaluated the student's synthesis response, after
+  which it's safe to close. Mirror the pattern used for `initial_understanding`
+  capture (deterministic, idempotent, no reliance on agent signalling).
+- **Frontend (`SessionView.tsx:186-188`):** Change the transition trigger
+  from `res.phase === "wrap_up"` to `res.session_complete`. Keep the
+  manual "Done — see your thinking trace" button at line 363 as the
+  fallback for sessions where the agent fails to wrap properly.
 - **Backend (`chat.py`):** The reflection question bank needs real questions.
   Minimum 3 per trigger type. Wrap-up examples: "What was the move that
   unlocked this?", "Where could you have gone wrong — what would you watch
