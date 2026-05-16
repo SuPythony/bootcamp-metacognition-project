@@ -39,7 +39,8 @@ export interface ToolCall {
 }
 
 export interface ChatResponse {
-  reply: string;
+  // reply can be null on tool-only turns per the agent output schema
+  reply: string | null;
   phase: Phase;
   subproblems: Subproblem[];
   tool_calls: ToolCall[];

@@ -12,6 +12,33 @@ import { Brandmark } from "../components/brand/Brandmark";
 import { ThemeToggle } from "../components/theme/ThemeToggle";
 import { lookup } from "../specializations/registry";
 
+// Directives that require a single-click answer and should block chat input
+// until the student responds. Display-only / type-into-chat directives
+// (ReflectionPrompt, PseudocodePad, OutlineTree) are intentionally excluded.
+export const INTERACTIVE_DIRECTIVES = new Set([
+  "CalibrationCheck",
+  "ConfidenceWidget",
+  "RuleRecallPrompt",
+]);
+
+// Pure helper: returns true if the last assistant message has an interactive
+// inline directive whose component is actually registered. Unknown components
+// and display-only directives must not lock the input.
+export function isAwaitingDirective(
+  messages: ChatMessage[],
+  componentExists: (key: string) => boolean,
+): boolean {
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  return Boolean(
+    lastAssistant?.directives?.some(
+      (d) =>
+        d.placement === "inline" &&
+        INTERACTIVE_DIRECTIVES.has(d.component) &&
+        componentExists(`${d.domain}.${d.component}`),
+    ),
+  );
+}
+
 export default function SessionView({
   sessionId,
   domain,
@@ -64,10 +91,14 @@ export default function SessionView({
       const sidePanelNew = res.ui_directives?.filter((d) => d.placement === "side_panel") ?? [];
       const modalNew = res.ui_directives?.filter((d) => d.placement === "modal") ?? [];
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: res.reply, directives: inlineDirectives },
-      ]);
+      // Skip empty assistant messages (backend sends reply: null on tool-only turns).
+      // Still push if there are inline directives to render.
+      if (res.reply || inlineDirectives.length > 0) {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: res.reply ?? "", directives: inlineDirectives },
+        ]);
+      }
 
       if (res.subproblems?.length > 0) setSubproblems(res.subproblems);
       if (res.phase) setPhase(res.phase);
@@ -128,16 +159,9 @@ export default function SessionView({
     send(undefined, { component, value });
   }
 
-  // Block chat input while an inline directive on the latest assistant message
-  // is awaiting an answer. Reflection prompts ask the student to type — those
-  // don't block.
-  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-  const awaitingDirective = Boolean(
-    lastAssistant?.directives?.some(
-      (d) =>
-        d.placement === "inline" &&
-        d.component !== "ReflectionPrompt",
-    ),
+  const awaitingDirective = isAwaitingDirective(
+    messages,
+    (key) => lookup(key) !== undefined,
   );
 
   useEffect(() => {
@@ -191,16 +215,18 @@ export default function SessionView({
             <PhaseStepper phase={phase} />
           </div>
           <div className="flex items-center gap-2 shrink-0 relative">
-            <button
-              ref={problemBtnRef}
-              onClick={() => setProblemOpen((o) => !o)}
-              aria-expanded={problemOpen}
-              aria-controls="original-problem-popover"
-              className="inline-flex items-center gap-1.5 text-caption text-ink-soft hover:text-ink border border-rule rounded-md px-2 py-1 transition-colors"
-            >
-              <FileText size={12} strokeWidth={1.8} />
-              Problem
-            </button>
+            {originalQuery && (
+              <button
+                ref={problemBtnRef}
+                onClick={() => setProblemOpen((o) => !o)}
+                aria-expanded={problemOpen}
+                aria-controls="original-problem-popover"
+                className="inline-flex items-center gap-1.5 text-caption text-ink-soft hover:text-ink border border-rule rounded-md px-2 py-1 transition-colors"
+              >
+                <FileText size={12} strokeWidth={1.8} />
+                Problem
+              </button>
+            )}
             <ThemeToggle />
             <button
               onClick={onWrapUp}

@@ -8,7 +8,7 @@ import remarkBreaks from "remark-breaks";
 import rehypeKatex from "rehype-katex";
 
 interface Props {
-  children: string;
+  children: string | null | undefined;
   className?: string;
   /** If true, strips outer <p> wrapper so it renders inline */
   inline?: boolean;
@@ -16,8 +16,10 @@ interface Props {
 
 // LLM occasionally returns the literal two-character sequence \\n instead of a
 // real newline. Normalize both into a real newline so remark-breaks can render
-// it as a <br>.
-function normalize(text: string): string {
+// it as a <br>. Also tolerate null/undefined since the backend may send
+// reply: null on tool-only turns.
+function normalize(text: string | null | undefined): string {
+  if (typeof text !== "string") return "";
   return text.replace(/\\n/g, "\n");
 }
 
