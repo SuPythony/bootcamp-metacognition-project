@@ -62,7 +62,7 @@ def _write_chat_log(entry: dict) -> None:
 
 from app import llm, persona as persona_mod, plugin_registry
 from app import session as session_mod
-from app.prompts.variants import load_combined, parse_domain_variants
+from app.prompts.variants import load_base_prompt, load_prompt, parse_domain_variants
 from app.session import (
     CalibrationPoint,
     Mode,
@@ -228,15 +228,22 @@ class ChatResponse(BaseModel):
 _MAX_TOOL_ITERATIONS = 3
 
 
-def _build_messages(session: Session, persona_ctx: str) -> list[dict]:
+def _build_messages(
+    session: Session, persona_ctx: str, had_tool_result: bool = False
+) -> list[dict]:
     """Build the OpenAI-style message list for an LLM call."""
-    domain_prompt = load_combined(
-        session.domain,
-        base_variant=_VARIANT_BASE,
-        domain_variant=_VARIANT_DOMAIN_MAP.get(session.domain),
+    base_text = load_base_prompt(
+        variant_key=_VARIANT_BASE,
+        session=session,
+        had_tool_result=had_tool_result,
     )
+    domain_text = load_prompt(
+        session.domain,
+        variant_key=_VARIANT_DOMAIN_MAP.get(session.domain),
+    )
+    system_content = base_text + "\n\n" + domain_text
     return [
-        {"role": "system", "content": domain_prompt},
+        {"role": "system", "content": system_content},
         {"role": "system", "content": f"Student profile:\n{persona_ctx}"},
         {"role": "system", "content": f"Session state:\n{session.to_context_str()}"},
         *session.message_history,
@@ -494,7 +501,9 @@ def _build_chat_response(
     )
 
 
-async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, dict | None]:
+async def _run_chat_turn(
+    session: Session, had_tool_result: bool = False
+) -> tuple[AgentResponse, dict | None, dict | None]:
     """Run one /chat turn: build prompt → call_tutor → optionally dispatch
     backend tool(s) → return the final AgentResponse + any frontend tool sentinel +
     any backend tool result.
@@ -510,7 +519,7 @@ async def _run_chat_turn(session: Session) -> tuple[AgentResponse, dict | None, 
     persona = persona_mod.load_persona(session.username)
     persona_ctx = persona.to_context_str() if persona else "No persona on file yet."
 
-    messages = _build_messages(session, persona_ctx)
+    messages = _build_messages(session, persona_ctx, had_tool_result=had_tool_result)
     last_backend_tool_result: dict | None = None
     last_tool_name: str | None = None  # tracks last executed tool for dedup
 
@@ -768,7 +777,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
         )
         session.pending_frontend_tool = None
 
-    parsed, frontend_tool, backend_tool_result = await _run_chat_turn(session)
+    had_tool_result = req.tool_result is not None
+    parsed, frontend_tool, backend_tool_result = await _run_chat_turn(
+        session, had_tool_result=had_tool_result
+    )
     # Phase guard: if the agent is asking for a calibration prediction this turn,
     # don't let it also transition to wrap_up — the student hasn't answered yet.
     calibration_requested = (
