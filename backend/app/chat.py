@@ -56,6 +56,7 @@ def _write_chat_log(entry: dict) -> None:
         return
     try:
         _setup_chat_logger().debug(json.dumps(entry))
+        llm._write_log(entry)  # mirror into llm.jsonl so view_logs.py sees everything
     except Exception:
         pass
 
