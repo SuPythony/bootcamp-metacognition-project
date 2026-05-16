@@ -9,6 +9,7 @@ import type {
   SessionNewRequest,
   SessionNewResponse,
   SpecializationManifestEntry,
+  StreamCallbacks,
   ThinkingTrace,
 } from "./types";
 
@@ -228,6 +229,21 @@ export async function chat(_body: ChatRequest): Promise<ChatResponse> {
   const turn = SCRIPTED_TURNS[Math.min(turnCount, SCRIPTED_TURNS.length - 1)];
   turnCount++;
   return turn;
+}
+
+export async function chatStream(
+  _body: ChatRequest,
+  callbacks: StreamCallbacks,
+): Promise<void> {
+  const turn = SCRIPTED_TURNS[Math.min(turnCount, SCRIPTED_TURNS.length - 1)];
+  turnCount++;
+  // Simulate word-by-word streaming with a short delay per word.
+  const words = (turn.reply ?? "").split(" ");
+  for (let i = 0; i < words.length; i++) {
+    await new Promise((r) => setTimeout(r, 30));
+    callbacks.onToken((i === 0 ? "" : " ") + words[i]);
+  }
+  callbacks.onState(turn);
 }
 
 export async function personaCreate(

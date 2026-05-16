@@ -486,16 +486,176 @@ async def call_summarizer(
         }
 
 
+class _ReplyExtractor:
+    """State machine that extracts the 'reply' string value from streaming JSON.
+
+    The model emits one JSON object whose content streams token-by-token.
+    Structure is always: { "thinking": "...", "reply": "...", "control": ..., "signal": ... }
+    We scan for the "reply" key, then emit each character inside its string value.
+
+    Handles JSON escape sequences (\n, \t, \\, \", ...) and gracefully ignores
+    false positives (e.g. "reply" inside the thinking string is escaped as
+    \"reply\" which fails the colon-check and resets the state).
+    """
+
+    def __init__(self) -> None:
+        self._state = "scan"   # scan → colon → open_quote → value → done
+        self._buf = ""
+        self._esc = False
+
+    def feed(self, chunk: str) -> str:
+        out: list[str] = []
+        for c in chunk:
+            if self._state == "scan":
+                self._buf += c
+                if len(self._buf) > 200:
+                    self._buf = self._buf[-200:]
+                if self._buf.endswith('"reply"'):
+                    self._state = "colon"
+                    self._buf = ""
+            elif self._state == "colon":
+                if c == ":":
+                    self._state = "open_quote"
+                elif c in " \t\n\r":
+                    pass
+                else:
+                    # False positive (e.g. \"reply\" inside a string value) — reset.
+                    self._state = "scan"
+                    self._buf = '"reply"' + c
+            elif self._state == "open_quote":
+                if c == '"':
+                    self._state = "value"
+                elif c in " \t\n\r":
+                    pass
+                elif c == "n":
+                    # "null" reply
+                    self._state = "done"
+                else:
+                    self._state = "scan"
+                    self._buf = c
+            elif self._state == "value":
+                if self._esc:
+                    _MAP = {
+                        "n": "\n", "t": "\t", "r": "\r", '"': '"',
+                        "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+                    }
+                    out.append(_MAP.get(c, c))
+                    self._esc = False
+                elif c == "\\":
+                    self._esc = True
+                elif c == '"':
+                    self._state = "done"
+                else:
+                    out.append(c)
+            # done: consume silently
+        return "".join(out)
+
+
 async def stream_tutor(
     messages: list[dict],
     schema: dict | None = None,
+    session_id: str = "",
+    temperature: float | None = None,
 ):
-    """Streaming tutor — async generator yielding ('token', chunk) for reply
-    deltas and ('state', dict) once with the validated control object.
+    """Streaming tutor turn — async generator yielding:
+      ('token', str)   — reply text chunks as they arrive from the model
+      ('state', dict)  — the full parsed JSON once the stream is complete
+      ('error', str)   — if the HTTP call or JSON parse fails (no 'state' follows)
 
-    Intentionally a stub: SSE is a staged follow-up. Wiring SSE in the chat
-    layer should land alongside the implementation of this generator.
+    The 'thinking' field is buffered server-side and never forwarded.
+    Token events are emitted only for characters inside the 'reply' value;
+    the thinking section, control block, and signal block are invisible to callers.
     """
-    raise NotImplementedError(
-        "Streaming is staged for a follow-up commit; use call_tutor in v1."
+    model = _env("LLM_MODEL_TUTOR")
+    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "1024"))
+    call_id = str(uuid.uuid4())
+    t0 = time.monotonic()
+
+    response_format: dict = (
+        {"type": "json_schema", "json_schema": {"name": "tutor_turn", "schema": schema, "strict": True}}
+        if schema is not None
+        else {"type": "json_object"}
     )
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "response_format": response_format,
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+
+    headers = {
+        "Authorization": f"Bearer {_api_key()}",
+        "Content-Type": "application/json",
+    }
+    url = f"{_base_url().rstrip('/')}/chat/completions"
+    full_content = ""
+    extractor = _ReplyExtractor()
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                if resp.status_code == 429:
+                    body = await resp.aread()
+                    yield ("error", f"OpenRouter rate-limited: {body[:200]}")
+                    return
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    yield ("error", f"OpenRouter {resp.status_code}: {body[:200]}")
+                    return
+
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk_json = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    try:
+                        delta = chunk_json["choices"][0]["delta"].get("content") or ""
+                    except (KeyError, IndexError):
+                        continue
+                    if not delta:
+                        continue
+                    full_content += delta
+                    tokens = extractor.feed(delta)
+                    if tokens:
+                        yield ("token", tokens)
+
+    except Exception as exc:  # noqa: BLE001
+        yield ("error", f"Stream error: {exc}")
+        return
+
+    if not full_content:
+        yield ("error", "Empty response from model")
+        return
+
+    cleaned = _strip_fences(full_content)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        yield ("error", f"Could not parse streaming response as JSON: {cleaned[:300]!r}")
+        return
+
+    _write_log({
+        "event": "llm_call",
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "call_id": call_id,
+        "session_id": session_id,
+        "model": model,
+        "latency_ms": int((time.monotonic() - t0) * 1000),
+        "input_tokens": 0,
+        "output_tokens": len(full_content.split()),
+        "raw_output": cleaned,
+        "user_message_preview": next(
+            (m["content"][:300] for m in reversed(messages) if m.get("role") == "user"), None
+        ),
+        "parse_success": None,
+        "streamed": True,
+    })
+    yield ("state", parsed)

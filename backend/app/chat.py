@@ -21,9 +21,10 @@ import random
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncGenerator, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 _log = logging.getLogger("app.chat")
@@ -709,8 +710,195 @@ async def session_new(req: SessionNewRequest) -> SessionNewResponse:
     )
 
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
+def _finalize_turn(
+    session: Session,
+    req: ChatRequest,
+    parsed: AgentResponse,
+    frontend_tool: dict | None,
+    backend_tool_result: dict | None,
+) -> ChatResponse:
+    """Apply phase/signal/persona logic after the LLM call(s) complete and build
+    the ChatResponse.  Called by both the JSON path and the SSE generator so the
+    logic lives in exactly one place.
+    """
+    calibration_requested = (
+        (parsed.signal is not None and parsed.signal.emit_calibration_check)
+        or bool(parsed.control.calibration_check)
+    )
+    if calibration_requested and parsed.control.phase == "wrap_up":
+        _log.warning(
+            "session=%s blocked wrap_up phase transition on same turn as calibration_check",
+            req.session_id[:8],
+        )
+        parsed.control.phase = None
+
+    session.phase = _validate_phase(session, parsed.control.phase)
+    parsed.control.hint_level = _clamp_hint_level(session, parsed.control.hint_level)
+    _apply_agent_response(session, parsed)
+    session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
+
+    onboarding_complete = False
+    if session.domain == "persona" and session.phase == "wrap_up":
+        persona_payload: dict = {}
+        if parsed.signal and parsed.signal.persona_updates:
+            for upd in parsed.signal.persona_updates:
+                if upd.get("operation") == "set" and upd.get("field") and upd.get("value") is not None:
+                    persona_payload[upd["field"]] = upd["value"]
+        if not persona_payload and parsed.control.persona:
+            persona_payload = parsed.control.persona
+        persona_mod.handle_persona_wrap_up(
+            session.username, persona_payload, session_id=session.session_id
+        )
+        onboarding_complete = True
+
+    _write_chat_log({
+        "event": "chat_turn",
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "session_id": req.session_id,
+        "turn": session.metrics.turns_total,
+        "phase": session.phase,
+        "active_subproblem": session.active_subproblem_id,
+        "hint_level": session.current_hint_level(),
+        "input_kind": (
+            "message" if req.message is not None
+            else "directive_response" if req.directive_response is not None
+            else "tool_result"
+        ),
+        "user_message": req.message,
+        "agent_reply_preview": (parsed.reply or "")[:120],
+        "tool_called": (parsed.control.tool_call.get("name") if isinstance(parsed.control.tool_call, dict) else None),
+        "phase_after": session.phase,
+    })
+    session_mod.put(session)
+    return _build_chat_response(
+        session, parsed,
+        frontend_tool_call=frontend_tool,
+        backend_tool_result=backend_tool_result,
+        onboarding_complete=onboarding_complete,
+    )
+
+
+async def _chat_sse_generator(
+    req: ChatRequest,
+    session: Session,
+    had_tool_result: bool,
+) -> AsyncGenerator[str, None]:
+    """Async generator for the SSE path.  Yields SSE-formatted strings.
+
+    First LLM call uses stream_tutor() so reply tokens are emitted in real time.
+    Backend tool-call follow-ups use call_tutor() (non-streaming) then emit the
+    second reply tokens via a second stream_tutor() call.
+    Final `state` event carries the full ChatResponse JSON.
+    """
+
+    def _sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    try:
+        persona = persona_mod.load_persona(session.username)
+        persona_ctx = persona.to_context_str() if persona else "No persona on file yet."
+        messages = _build_messages(session, persona_ctx, had_tool_result=had_tool_result)
+        last_backend_tool_result: dict | None = None
+        last_tool_name: str | None = None
+
+        for iteration in range(_MAX_TOOL_ITERATIONS):
+            # Stream the LLM call — emit token events as reply chars arrive.
+            full_raw: dict | None = None
+            async for etype, edata in llm.stream_tutor(
+                messages, session_id=session.session_id, temperature=_TUTOR_TEMP
+            ):
+                if etype == "token":
+                    yield _sse("token", {"delta": edata})
+                elif etype == "state":
+                    full_raw = edata
+                elif etype == "error":
+                    yield _sse("error", {"message": edata})
+                    return
+
+            if full_raw is None:
+                yield _sse("error", {"message": "No response received from model"})
+                return
+
+            full_raw.pop("thinking", None)
+            try:
+                parsed = AgentResponse.model_validate(full_raw)
+                llm.mark_parse_result(session.session_id, True)
+            except Exception as e:
+                llm.mark_parse_result(session.session_id, False, str(e))
+                yield _sse("error", {"message": f"Agent output failed schema validation: {e}"})
+                return
+            parsed.thinking = None
+
+            # Tool/reply mutual exclusion (same guard as JSON path).
+            if parsed.control.tool_call is not None and parsed.reply:
+                word_count = len(parsed.reply.split())
+                sentence_count = sum(parsed.reply.count(p) for p in ".?!")
+                if word_count > 30 or sentence_count > 1:
+                    _log.warning(
+                        "session=%s (sse) tool_call set but reply too long — discarding reply",
+                        session.session_id[:8],
+                    )
+                    parsed.reply = None
+
+            if parsed.control.tool_call is None:
+                break
+
+            tool_name = parsed.control.tool_call.get("name")
+            tool_args = parsed.control.tool_call.get("args", {})
+            if not tool_name:
+                yield _sse("error", {"message": "Agent emitted tool_call without 'name'"})
+                return
+
+            if tool_name == last_tool_name and last_backend_tool_result is not None:
+                _log.warning("session=%s (sse) duplicate tool call — breaking loop", session.session_id[:8])
+                break
+
+            try:
+                dispatch = plugin_registry.dispatch_tool(session.domain, tool_name, tool_args, session)
+            except KeyError as e:
+                yield _sse("error", {"message": str(e)})
+                return
+
+            if dispatch["execution"] == "frontend":
+                session.pending_frontend_tool = dispatch
+                # Surface to client via state event below; no more LLM calls needed.
+                break
+
+            assistant_msg = {"role": "assistant", "content": parsed.reply or ""}
+            messages.append(assistant_msg)
+            session.message_history.append(assistant_msg)
+
+            last_tool_name = tool_name
+            last_backend_tool_result = dispatch
+            display_data = dispatch.get("display_data", {})
+            tool_msg = {
+                "role": "user",
+                "content": (
+                    f"[SYSTEM] Tool '{tool_name}' result:\n"
+                    f"  answer: {dispatch.get('result')!r}\n"
+                    f"  display (shown to student): {json.dumps(display_data)}\n"
+                    f"Reply to the student now. Ask them to interpret this output. "
+                    f"Do not call any tool. Set tool_call to null."
+                ),
+            }
+            messages.append(tool_msg)
+            session.message_history.append(tool_msg)
+            # Loop: next iteration streams the post-tool reply.
+
+        frontend_tool = session.pending_frontend_tool if hasattr(session, "pending_frontend_tool") and session.pending_frontend_tool else None
+
+        chat_response = _finalize_turn(session, req, parsed, frontend_tool, last_backend_tool_result)
+        yield _sse("state", chat_response.model_dump())
+
+    except HTTPException as exc:
+        yield _sse("error", {"code": exc.status_code, "message": exc.detail})
+    except Exception as exc:
+        _log.exception("Unhandled error in SSE generator session=%s", req.session_id[:8])
+        yield _sse("error", {"code": 500, "message": str(exc)})
+
+
+@router.post("/chat")
+async def chat(req: ChatRequest, request: Request):
     inputs = [req.message, req.directive_response, req.tool_result]
     if sum(x is not None for x in inputs) != 1:
         raise HTTPException(
@@ -778,69 +966,20 @@ async def chat(req: ChatRequest) -> ChatResponse:
         session.pending_frontend_tool = None
 
     had_tool_result = req.tool_result is not None
+
+    # SSE path: stream reply tokens in real time, emit `state` event at end.
+    if "text/event-stream" in request.headers.get("accept", ""):
+        return StreamingResponse(
+            _chat_sse_generator(req, session, had_tool_result),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # JSON path (backward-compat, used by tests and non-streaming clients).
     parsed, frontend_tool, backend_tool_result = await _run_chat_turn(
         session, had_tool_result=had_tool_result
     )
-    # Phase guard: if the agent is asking for a calibration prediction this turn,
-    # don't let it also transition to wrap_up — the student hasn't answered yet.
-    calibration_requested = (
-        (parsed.signal is not None and parsed.signal.emit_calibration_check)
-        or bool(parsed.control.calibration_check)  # deprecated path
-    )
-    if calibration_requested and parsed.control.phase == "wrap_up":
-        _log.warning(
-            "session=%s blocked wrap_up phase transition on same turn as calibration_check",
-            req.session_id[:8],
-        )
-        parsed.control.phase = None
-    session.phase = _validate_phase(session, parsed.control.phase)
-    parsed.control.hint_level = _clamp_hint_level(session, parsed.control.hint_level)
-    _apply_agent_response(session, parsed)
-    session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
-
-    onboarding_complete = False
-    if session.domain == "persona" and session.phase == "wrap_up":
-        # Build persona stub from signal.persona_updates (new schema: model emits
-        # individual field updates, not a nested control.persona dict).
-        persona_payload: dict = {}
-        if parsed.signal and parsed.signal.persona_updates:
-            for upd in parsed.signal.persona_updates:
-                if upd.get("operation") == "set" and upd.get("field") and upd.get("value") is not None:
-                    persona_payload[upd["field"]] = upd["value"]
-        # Fallback: old schema emitted control.persona directly.
-        if not persona_payload and parsed.control.persona:
-            persona_payload = parsed.control.persona
-        persona_mod.handle_persona_wrap_up(
-            session.username, persona_payload, session_id=session.session_id
-        )
-        onboarding_complete = True
-
-    _write_chat_log({
-        "event": "chat_turn",
-        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "session_id": req.session_id,
-        "turn": session.metrics.turns_total,
-        "phase": session.phase,
-        "active_subproblem": session.active_subproblem_id,
-        "hint_level": session.current_hint_level(),
-        "input_kind": (
-            "message" if req.message is not None
-            else "directive_response" if req.directive_response is not None
-            else "tool_result"
-        ),
-        "user_message": req.message,
-        "agent_reply_preview": (parsed.reply or "")[:120],
-        "tool_called": (parsed.control.tool_call.get("name") if isinstance(parsed.control.tool_call, dict) else None),
-        "phase_after": session.phase,
-    })
-    session_mod.put(session)
-    return _build_chat_response(
-        session,
-        parsed,
-        frontend_tool_call=frontend_tool,
-        backend_tool_result=backend_tool_result,
-        onboarding_complete=onboarding_complete,
-    )
+    return _finalize_turn(session, req, parsed, frontend_tool, backend_tool_result)
 
 
 class ToolDispatchRequest(BaseModel):

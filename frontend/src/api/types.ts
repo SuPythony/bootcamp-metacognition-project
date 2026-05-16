@@ -124,6 +124,12 @@ export interface ThinkingTrace {
   }>;
 }
 
+export interface StreamCallbacks {
+  onToken: (delta: string) => void;
+  onState: (state: ChatResponse) => void;
+  onError: (message: string) => void;
+}
+
 export interface SpecializationManifestEntry {
   domain: Domain;
   display_name: string;
