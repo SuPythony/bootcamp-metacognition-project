@@ -1212,6 +1212,14 @@ def main():
         default=5000
     )
 
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable Flask debug mode (Werkzeug reloader + interactive "
+             "debugger). DO NOT use in production — the debugger is "
+             "RCE-capable. Default: off.",
+    )
+
     args = parser.parse_args()
 
     global LOGS
@@ -1228,7 +1236,7 @@ def main():
     app.run(
         host=args.host,
         port=args.port,
-        debug=True
+        debug=args.debug
     )
 
 

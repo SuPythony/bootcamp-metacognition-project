@@ -58,6 +58,13 @@ echo "==> Restarting backend"
 echo "    (in-flight sessions will be reset — sessions are in-memory by design)"
 sudo /usr/bin/systemctl restart aporeka
 
+# Only restart the log viewer if it's actually running — don't auto-start it
+# for users who chose not to enable it.
+if /usr/bin/systemctl is-active --quiet aporeka-logs; then
+    echo "==> Restarting log viewer"
+    sudo /usr/bin/systemctl restart aporeka-logs
+fi
+
 echo "==> Reloading nginx"
 sudo /usr/sbin/nginx -t
 sudo /usr/bin/systemctl reload nginx

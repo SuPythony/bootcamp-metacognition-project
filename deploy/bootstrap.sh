@@ -80,10 +80,13 @@ ln -sf /etc/nginx/sites-available/aporeka /etc/nginx/sites-enabled/aporeka
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 
-echo "==> Rendering systemd unit"
+echo "==> Rendering systemd units"
 envsubst '${APP_USER} ${APP_DIR}' \
     < "$SCRIPT_DIR/aporeka.service" \
     > /etc/systemd/system/aporeka.service
+envsubst '${APP_USER} ${APP_DIR}' \
+    < "$SCRIPT_DIR/aporeka-logs.service" \
+    > /etc/systemd/system/aporeka-logs.service
 systemctl daemon-reload
 
 echo "==> Rendering /etc/aporeka.env"
@@ -99,7 +102,7 @@ fi
 
 echo "==> Installing sudoers entry for deploy.sh"
 cat > /etc/sudoers.d/aporeka <<EOF
-$APP_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart aporeka, /usr/bin/systemctl reload nginx, /usr/sbin/nginx -t, /usr/bin/systemctl status aporeka
+$APP_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart aporeka, /usr/bin/systemctl restart aporeka-logs, /usr/bin/systemctl reload nginx, /usr/sbin/nginx -t, /usr/bin/systemctl status aporeka, /usr/bin/systemctl status aporeka-logs
 EOF
 chmod 440 /etc/sudoers.d/aporeka
 visudo -c -f /etc/sudoers.d/aporeka
@@ -120,5 +123,11 @@ Next steps:
        sudo certbot --nginx -d $APP_HOSTNAME --non-interactive --agree-tos -m $ADMIN_EMAIL
   4. Enable boot persistence:
        sudo systemctl enable aporeka
+
+  5. (Optional) Start the log viewer on 127.0.0.1:5000 — localhost-only,
+     no public exposure. Access it by tunnelling from your laptop:
+       sudo systemctl enable --now aporeka-logs    # on the box
+       ssh -L 5000:127.0.0.1:5000 $APP_USER@$APP_HOSTNAME   # from your laptop
+     then open http://localhost:5000 in your browser.
 
 EOF
