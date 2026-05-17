@@ -364,6 +364,27 @@ pre {
     margin-right: 4px;
 }
 
+.auto-refresh {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #9aa4b2;
+    font-size: 11px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.auto-refresh input {
+    margin: 0;
+    cursor: pointer;
+}
+
+#refreshStatus {
+    color: #6b7785;
+    font-size: 11px;
+    min-width: 80px;
+}
+
 .hidden {
     display: none;
 }
@@ -468,11 +489,16 @@ Select logs to export
 
 <div class="export-controls">
 
-<form method="POST" action="/refresh">
-<button type="submit">
+<label class="auto-refresh">
+<input type="checkbox" id="autoRefreshToggle">
+Auto-refresh (5s)
+</label>
+
+<span id="refreshStatus"></span>
+
+<button type="button" onclick="refreshLogs()">
 Refresh Logs
 </button>
-</form>
 
 <button onclick="downloadReadable()">
 Readable Export
@@ -490,7 +516,10 @@ JSONL Export
 
 {% set parsed = parse_raw(log.get("raw_output")) %}
 
-<details class="log">
+<details
+    class="log"
+    data-log-key="{{log.get('event','')}}|{{log.get('ts','')}}|{{log.get('call_id','')}}|{{loop.index}}"
+>
 
 <summary>
 
@@ -693,6 +722,15 @@ raw
 
 <script>
 
+const AUTO_REFRESH_KEY = "logviewer.autoRefresh";
+const SCROLL_KEY = "logviewer.scrollY";
+const OPEN_LOGS_KEY = "logviewer.openLogs";
+const REFRESH_INTERVAL_MS = 5000;
+
+let autoRefreshTimer = null;
+let lastRefreshAt = Date.now();
+let statusTickTimer = null;
+
 document.querySelectorAll(".event-chip").forEach(chip => {
 
     chip.addEventListener("click", () => {
@@ -707,6 +745,143 @@ document.querySelectorAll(".event-chip").forEach(chip => {
             checkbox.checked
         );
     });
+});
+
+function saveViewState() {
+
+    sessionStorage.setItem(
+        SCROLL_KEY,
+        String(window.scrollY)
+    );
+
+    const openKeys = [
+        ...document.querySelectorAll(
+            "details.log[open]"
+        )
+    ].map(d => d.dataset.logKey);
+
+    sessionStorage.setItem(
+        OPEN_LOGS_KEY,
+        JSON.stringify(openKeys)
+    );
+}
+
+function restoreViewState() {
+
+    const y = sessionStorage.getItem(SCROLL_KEY);
+
+    if (y !== null) {
+        window.scrollTo(0, parseInt(y, 10));
+        sessionStorage.removeItem(SCROLL_KEY);
+    }
+
+    const raw = sessionStorage.getItem(OPEN_LOGS_KEY);
+
+    if (raw) {
+        try {
+            const keys = JSON.parse(raw);
+            for (const key of keys) {
+                const el = document.querySelector(
+                    `details.log[data-log-key="${
+                        CSS.escape(key)
+                    }"]`
+                );
+                if (el) el.open = true;
+            }
+        } catch (e) {
+            // ignore corrupt state
+        }
+        sessionStorage.removeItem(OPEN_LOGS_KEY);
+    }
+}
+
+async function refreshLogs() {
+
+    saveViewState();
+
+    try {
+        await fetch(
+            "/refresh",
+            { method: "POST" }
+        );
+    } catch (e) {
+        console.error("refresh failed:", e);
+    }
+
+    // Reload current URL so query-string filters survive.
+    window.location.reload();
+}
+
+function updateStatus() {
+
+    const status = document.getElementById("refreshStatus");
+    if (!status) return;
+
+    const on = autoRefreshTimer !== null;
+
+    if (!on) {
+        status.textContent = "";
+        return;
+    }
+
+    const secs = Math.round(
+        (Date.now() - lastRefreshAt) / 1000
+    );
+
+    status.textContent =
+        `auto • refreshed ${secs}s ago`;
+}
+
+function setAutoRefresh(on) {
+
+    if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+    }
+
+    if (statusTickTimer) {
+        clearInterval(statusTickTimer);
+        statusTickTimer = null;
+    }
+
+    if (on) {
+        autoRefreshTimer = setInterval(
+            refreshLogs,
+            REFRESH_INTERVAL_MS
+        );
+        statusTickTimer = setInterval(
+            updateStatus,
+            1000
+        );
+    }
+
+    sessionStorage.setItem(
+        AUTO_REFRESH_KEY,
+        on ? "1" : "0"
+    );
+
+    updateStatus();
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+
+    restoreViewState();
+
+    const toggle = document.getElementById(
+        "autoRefreshToggle"
+    );
+
+    const on =
+        sessionStorage.getItem(AUTO_REFRESH_KEY) === "1";
+
+    toggle.checked = on;
+
+    setAutoRefresh(on);
+
+    toggle.addEventListener(
+        "change",
+        (e) => setAutoRefresh(e.target.checked)
+    );
 });
 
 function selectedLogs() {
@@ -1017,11 +1192,7 @@ def refresh():
 
     rebuild_indexes()
 
-    return (
-        '<script>'
-        'window.location.href = "/"'
-        '</script>'
-    )
+    return {"ok": True, "count": len(LOGS)}
 
 
 def main():
