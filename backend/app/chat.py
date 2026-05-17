@@ -130,6 +130,21 @@ WRAP_UP_PREMATURE_CLOSE_PATTERNS = [
     re.compile(r"\bgood job\b", re.IGNORECASE),
 ]
 
+# Cues that indicate the reply IS the synthesis ask. If none of these are present
+# on the entering-wrap_up turn, the safety net appends the synthesis question.
+WRAP_UP_SYNTHESIS_CUES = [
+    re.compile(r"\byour own words\b", re.IGNORECASE),
+    re.compile(r"\bwalk me through\b", re.IGNORECASE),
+    re.compile(r"\bexplain the (full|whole)\b", re.IGNORECASE),
+    re.compile(r"\bdescribe the (full|whole)\b", re.IGNORECASE),
+    re.compile(r"\btalk me through\b", re.IGNORECASE),
+]
+
+WRAP_UP_SYNTHESIS_FALLBACK = (
+    "Before we finish — can you walk me through the full solution "
+    "in your own words?"
+)
+
 
 # ---- Request / response models ----------------------------------------------
 
@@ -466,21 +481,34 @@ def _build_chat_response(
             "model should emit signal.emit_reflection instead",
             parsed.control.reflection_prompt,
         )
+    # Inject the ReflectionPrompt directive whenever a reflection is queued — either
+    # from the agent's signal.emit_reflection OR from a backend-deterministic capture
+    # (e.g. _maybe_queue_wrap_up_reflection). The injection used to require the agent
+    # signal, which made wrap-up reflections silently skip when the model didn't emit.
     emit_trigger = parsed.signal.emit_reflection if parsed.signal else None
-    if emit_trigger and not any(d.get("component") == "ReflectionPrompt" for d in directives):
-        # Reuse the question already chosen and stored in _apply_agent_response so
-        # the directive and the session record are consistent.
-        idx = session.pending_reflection_index
-        if idx is not None and 0 <= idx < len(session.reflection_prompts):
-            question = session.reflection_prompts[idx].question
+    queued_idx = session.pending_reflection_index
+    queued_rp = (
+        session.reflection_prompts[queued_idx]
+        if queued_idx is not None and 0 <= queued_idx < len(session.reflection_prompts)
+        else None
+    )
+    if (
+        (emit_trigger or queued_rp)
+        and not any(d.get("component") == "ReflectionPrompt" for d in directives)
+    ):
+        trigger = emit_trigger or (queued_rp.trigger if queued_rp else "periodic")
+        if queued_rp is not None:
+            question = queued_rp.question
         else:
-            question = random.choice(REFLECTION_QUESTIONS.get(emit_trigger, REFLECTION_QUESTIONS["periodic"]))
+            question = random.choice(
+                REFLECTION_QUESTIONS.get(trigger, REFLECTION_QUESTIONS["periodic"])
+            )
         directives.append({
             "component": "ReflectionPrompt",
             "domain": "general",
             "props": {
                 "question": question,
-                "trigger": emit_trigger,
+                "trigger": trigger,
             },
             "placement": "inline",
             "lifetime": "until_next_turn",
@@ -758,6 +786,45 @@ async def _maybe_capture_initial_understanding(
         session.initial_understanding = summary
 
 
+def _maybe_queue_wrap_up_reflection(
+    session: Session, parsed: AgentResponse, previous_phase: Phase
+) -> None:
+    """On the second wrap_up turn (i.e. the turn AFTER the student answered the
+    synthesis ask), queue a wrap_up reflection deterministically if the agent
+    didn't emit signal.emit_reflection itself.
+
+    Mirrors _maybe_capture_initial_understanding: the agent's signal is honoured
+    when present; this is the fallback so the reflection round-trip is guaranteed
+    even when the model never plays its scripted part.
+
+    Idempotent: once a wrap_up-trigger reflection exists in the session, never
+    queues a second one.
+    """
+    if previous_phase != "wrap_up" or session.phase != "wrap_up":
+        return
+    # The agent's own emit_reflection has already set pending_reflection_index in
+    # _apply_agent_response — don't clobber it.
+    if session.pending_reflection_index is not None:
+        return
+    if any(rp.trigger == "wrap_up" for rp in session.reflection_prompts):
+        return
+
+    already_asked = {rp.question for rp in session.reflection_prompts}
+    bank = REFLECTION_QUESTIONS["wrap_up"]
+    available = [q for q in bank if q not in already_asked] or bank
+    question = random.choice(available)
+    rp = ReflectionPrompt(trigger="wrap_up", question=question)
+    session.reflection_prompts.append(rp)
+    session.pending_reflection_index = len(session.reflection_prompts) - 1
+    # XOR with reply: the reflection card replaces this turn's assistant text,
+    # matching the convention at the top of _finalize_turn (line ~787).
+    parsed.reply = None
+    _log.info(
+        "session=%s backend-queued wrap_up reflection (agent didn't emit signal)",
+        session.session_id[:8],
+    )
+
+
 async def _finalize_turn(
     session: Session,
     req: ChatRequest,
@@ -791,27 +858,32 @@ async def _finalize_turn(
     session.phase = _validate_phase(session, parsed.control.phase)
     parsed.control.hint_level = _clamp_hint_level(session, parsed.control.hint_level)
 
-    # Safety net: if model closes wrap_up prematurely (congratulating without asking
-    # synthesis), append the synthesis question so the student can still respond.
-    # The prompt fix is the primary prevention; this is the fallback.
+    # Safety net for the wrap_up entry turn: the agent's reply MUST be the synthesis
+    # ask. Two failure modes observed in real sessions:
+    #   1. Premature closure ("well done!") — caught by WRAP_UP_PREMATURE_CLOSE_PATTERNS.
+    #   2. Content/verification question instead of synthesis — caught by absence of
+    #      WRAP_UP_SYNTHESIS_CUES.
+    # Either way, append the synthesis question so the student can still respond.
     entering_wrap_up = (previous_phase != "wrap_up" and session.phase == "wrap_up")
     if (
         entering_wrap_up
         and not emit_trigger
         and not calibration_requested
         and parsed.reply is not None
-        and any(p.search(parsed.reply) for p in WRAP_UP_PREMATURE_CLOSE_PATTERNS)
     ):
-        _log.warning(
-            "session=%s wrap_up premature close detected — appending synthesis question",
-            session.session_id[:8],
-        )
-        parsed.reply += (
-            "\n\nBefore we finish — can you walk me through the full solution "
-            "in your own words?"
-        )
+        reply_text = parsed.reply
+        has_closure = any(p.search(reply_text) for p in WRAP_UP_PREMATURE_CLOSE_PATTERNS)
+        has_synthesis_cue = any(p.search(reply_text) for p in WRAP_UP_SYNTHESIS_CUES)
+        if has_closure or not has_synthesis_cue:
+            reason = "premature close" if has_closure else "no synthesis cue"
+            _log.warning(
+                "session=%s wrap_up safety net fired (%s) — appending synthesis question",
+                session.session_id[:8], reason,
+            )
+            parsed.reply = reply_text + "\n\n" + WRAP_UP_SYNTHESIS_FALLBACK
 
     _apply_agent_response(session, parsed)
+    _maybe_queue_wrap_up_reflection(session, parsed, previous_phase)
     session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
 
     await _maybe_capture_initial_understanding(session, previous_phase)
@@ -850,11 +922,17 @@ async def _finalize_turn(
     })
     # wrap_up_complete: True once the reflection round-trip is done.
     # Never True on the first turn entering wrap_up — the student must have a chance
-    # to answer the synthesis question before the session ends.
+    # to answer the synthesis question before the session ends. Also requires that
+    # at least one wrap_up reflection has been evaluated for quality, so the session
+    # can't close before the reflection card has been seen + answered + graded.
     wrap_up_complete = (
         session.phase == "wrap_up"
         and session.pending_reflection_index is None
         and not entering_wrap_up
+        and any(
+            rp.trigger == "wrap_up" and rp.quality is not None
+            for rp in session.reflection_prompts
+        )
     )
 
     session_mod.put(session)

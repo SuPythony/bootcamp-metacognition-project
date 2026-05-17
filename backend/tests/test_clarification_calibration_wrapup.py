@@ -270,23 +270,37 @@ def test_wrap_up_complete_false_on_first_wrap_up_turn(client, fake_openrouter):
 
 
 def test_wrap_up_complete_true_on_subsequent_wrap_up_turn(client, fake_openrouter):
-    """After student responds in wrap_up with no pending reflection, wrap_up_complete is True."""
+    """wrap_up_complete is True once a wrap_up reflection has been answered AND graded.
+
+    Walks the full three-turn dance: entry → reflection → quality. wrap_up_complete
+    must stay False until the quality is recorded on the last turn.
+    """
     sid = _new_session(client, fake_openrouter)
     _advance_to_wrap_up(client, fake_openrouter, sid)
 
-    # First wrap_up turn (synthesis question or premature close).
+    # Turn 1: entering wrap_up. Agent doesn't emit reflection — the backend
+    # will queue one deterministically on the next turn.
     fake_openrouter.responses = [
-        _agent_reply("Well done! You solved it.", phase="wrap_up"),
+        _agent_reply("Walk me through it in your own words.", phase="wrap_up"),
     ]
-    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+    r1 = client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+    assert r1.json()["wrap_up_complete"] is False
 
-    # Second turn: student responds; model closes warmly without emit_reflection.
+    # Turn 2: second wrap_up turn — backend queues a wrap_up reflection.
+    # Session can't be complete yet — student needs to answer the reflection.
     fake_openrouter.responses = [
-        _agent_reply("Great — see you next time!"),
+        _agent_reply("Anything else?"),
     ]
-    resp = client.post("/chat", json={"session_id": sid, "message": "Thanks!"})
-    assert resp.status_code == 200
-    assert resp.json()["wrap_up_complete"] is True
+    r2 = client.post("/chat", json={"session_id": sid, "message": "I subtracted 3 then divided."})
+    assert r2.json()["wrap_up_complete"] is False
+
+    # Turn 3: student answers the reflection; agent evaluates quality + closes.
+    fake_openrouter.responses = [
+        _agent_reply("Nice reflection — see you next time!", last_reflection_quality="decent"),
+    ]
+    r3 = client.post("/chat", json={"session_id": sid, "message": "I learned to isolate x."})
+    assert r3.status_code == 200
+    assert r3.json()["wrap_up_complete"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -357,3 +371,180 @@ def test_reflection_dedup_falls_back_when_bank_exhausted(client, fake_openrouter
     session = session_mod.get(sid)
     last_q = session.reflection_prompts[-1].question
     assert last_q in bank
+
+
+# ---------------------------------------------------------------------------
+# Flow 4: backend-deterministic wrap_up reflection (Failure 2 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_up_reflection_queued_deterministically(client, fake_openrouter):
+    """On the SECOND wrap_up turn, when the agent emits empty signal, the backend
+    must queue a wrap_up reflection itself. Mirrors the initial_understanding pattern."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    # Turn 1 (entering wrap_up): agent does not emit reflection.
+    fake_openrouter.responses = [
+        _agent_reply("Walk me through it in your own words.", phase="wrap_up"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+
+    from app import session as session_mod
+    session = session_mod.get(sid)
+    # No reflection queued on the entry turn — student must answer synthesis first.
+    assert not any(rp.trigger == "wrap_up" for rp in session.reflection_prompts)
+    assert session.pending_reflection_index is None
+
+    # Turn 2 (second wrap_up turn): agent still does not emit reflection.
+    fake_openrouter.responses = [
+        _agent_reply("Anything more?"),
+    ]
+    resp = client.post(
+        "/chat",
+        json={"session_id": sid, "message": "I subtracted 3 then divided by 2."},
+    )
+    assert resp.status_code == 200
+
+    session = session_mod.get(sid)
+    # Backend must have queued a wrap_up reflection.
+    wrap_up_rps = [rp for rp in session.reflection_prompts if rp.trigger == "wrap_up"]
+    assert len(wrap_up_rps) == 1, "backend should have queued exactly one wrap_up reflection"
+    assert session.pending_reflection_index is not None
+    # The directive must be in the response so the frontend renders the card.
+    directives = resp.json()["ui_directives"]
+    assert any(d["component"] == "ReflectionPrompt" for d in directives), (
+        f"ReflectionPrompt directive missing from response: {directives}"
+    )
+    # Reply must be suppressed (XOR with the reflection card).
+    assert resp.json()["reply"] is None
+
+
+def test_wrap_up_reflection_idempotent(client, fake_openrouter):
+    """Once a wrap_up reflection exists in the session, subsequent turns must NOT
+    queue another one."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    # Turn 1: enter wrap_up. No reflection yet.
+    fake_openrouter.responses = [
+        _agent_reply("Walk me through it in your own words.", phase="wrap_up"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+
+    # Turn 2: backend queues the reflection.
+    fake_openrouter.responses = [_agent_reply("Anything more?")]
+    client.post("/chat", json={"session_id": sid, "message": "I subtracted then divided."})
+
+    # Turn 3: student answers reflection, agent records quality. Clears pending index.
+    fake_openrouter.responses = [
+        _agent_reply("Nice reflection.", last_reflection_quality="decent"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "I learned to isolate x."})
+
+    # Turn 4: another wrap_up turn — backend must NOT queue a second reflection.
+    fake_openrouter.responses = [_agent_reply("Take care.")]
+    client.post("/chat", json={"session_id": sid, "message": "Thanks!"})
+
+    from app import session as session_mod
+    session = session_mod.get(sid)
+    wrap_up_rps = [rp for rp in session.reflection_prompts if rp.trigger == "wrap_up"]
+    assert len(wrap_up_rps) == 1, (
+        f"backend queued a second wrap_up reflection (idempotency broken): "
+        f"{[rp.question for rp in wrap_up_rps]}"
+    )
+
+
+def test_wrap_up_reflection_directive_without_agent_signal(client, fake_openrouter):
+    """The ReflectionPrompt directive must appear even when the agent never emits
+    signal.emit_reflection — the injection now keys off pending_reflection_index."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    fake_openrouter.responses = [
+        _agent_reply("Walk me through it in your own words.", phase="wrap_up"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+
+    fake_openrouter.responses = [_agent_reply("Anything more?")]
+    resp = client.post(
+        "/chat",
+        json={"session_id": sid, "message": "I subtracted 3 then divided by 2."},
+    )
+
+    body = resp.json()
+    refl_directives = [d for d in body["ui_directives"] if d["component"] == "ReflectionPrompt"]
+    assert len(refl_directives) == 1
+    assert refl_directives[0]["props"]["trigger"] == "wrap_up"
+    # Question must come from the wrap_up bank.
+    from app.chat import REFLECTION_QUESTIONS
+    assert refl_directives[0]["props"]["question"] in REFLECTION_QUESTIONS["wrap_up"]
+
+
+def test_wrap_up_complete_blocked_until_quality_recorded(client, fake_openrouter):
+    """wrap_up_complete must stay False until at least one wrap_up reflection has
+    quality recorded, even if pending_reflection_index is None."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    # Turn 1: entry. Reply contains synthesis cue so safety-net doesn't fire.
+    fake_openrouter.responses = [
+        _agent_reply("Walk me through it in your own words.", phase="wrap_up"),
+    ]
+    r1 = client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+    assert r1.json()["wrap_up_complete"] is False
+
+    # Turn 2: backend queues reflection. pending_reflection_index set → not complete.
+    fake_openrouter.responses = [_agent_reply("Anything more?")]
+    r2 = client.post(
+        "/chat",
+        json={"session_id": sid, "message": "I subtracted 3 then divided."},
+    )
+    assert r2.json()["wrap_up_complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# Flow 5: synthesis safety-net (Failure 1 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_synthesis_safety_net_fires_on_content_question(client, fake_openrouter):
+    """When the agent transitions to wrap_up but asks a content question instead
+    of the synthesis question (no closure phrases, no synthesis cues), the
+    safety-net must append the synthesis question."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    # Agent transitions to wrap_up with a content-style question — no closure
+    # phrase like "well done", no synthesis cue like "in your own words".
+    fake_openrouter.responses = [
+        _agent_reply(
+            "Is there one of these that still feels a bit confusing?",
+            phase="wrap_up",
+        ),
+    ]
+    resp = client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+    assert resp.status_code == 200
+    reply = resp.json()["reply"]
+    # The agent's content question must still be there.
+    assert "Is there one of these" in reply
+    # The synthesis ask must have been appended by the safety net.
+    assert "walk me through" in reply.lower() or "your own words" in reply.lower()
+
+
+def test_synthesis_safety_net_skips_when_synthesis_cue_present(client, fake_openrouter):
+    """When the agent's reply already contains a synthesis cue, the safety-net
+    must NOT append a second copy."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    fake_openrouter.responses = [
+        _agent_reply(
+            "Can you walk me through how you got there in your own words?",
+            phase="wrap_up",
+        ),
+    ]
+    resp = client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+    reply = resp.json()["reply"]
+    # Only one synthesis cue — the safety-net didn't duplicate.
+    assert reply.lower().count("walk me through") == 1
