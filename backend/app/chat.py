@@ -827,12 +827,18 @@ async def _maybe_capture_initial_understanding(
         session.initial_understanding = summary
 
 
-def _maybe_force_reflection_quality(session: Session) -> None:
+def _maybe_force_reflection_quality(session: Session, parsed: AgentResponse) -> None:
     """Safety net: when a wrap_up reflection has a student response but the
     agent has gone two finalized turns without setting last_reflection_quality,
     force quality='decent' so the session can close. Mirrors the
     deterministic-backend pattern used in `_maybe_queue_wrap_up_reflection`
     and `_maybe_capture_initial_understanding`.
+
+    When the safety net fires, the agent's reply is replaced with
+    WRAP_UP_GRACEFUL_CLOSE so the screen doesn't cut to WrapUpView mid-question.
+    The session is about to transition (wrap_up_complete will flip true); a
+    trailing question or arbitrary chat text would otherwise sit on screen for
+    ~1.8s and then vanish, which reads as a forcible visible change.
 
     The agent's intended pattern (see block_reflection_eval.txt) is: receive
     student response on turn N+1, emit last_reflection_quality on the same
@@ -854,6 +860,10 @@ def _maybe_force_reflection_quality(session: Session) -> None:
     rp.quality = "decent"
     session.pending_reflection_index = None
     session.pending_reflection_response_turns = 0
+    # Silent close: replace whatever the agent said with the canonical close
+    # line so the screen doesn't show a stale question/comment when the view
+    # auto-transitions to WrapUpView ~1.8s later.
+    parsed.reply = WRAP_UP_GRACEFUL_CLOSE
     _log.warning(
         "session=%s forced wrap_up reflection quality='decent' "
         "(agent never emitted last_reflection_quality after %d turns)",
@@ -967,7 +977,7 @@ async def _finalize_turn(
 
     _apply_agent_response(session, parsed)
     _maybe_queue_wrap_up_reflection(session, parsed, previous_phase)
-    _maybe_force_reflection_quality(session)
+    _maybe_force_reflection_quality(session, parsed)
 
     # Graceful close: when the agent emits last_reflection_quality in wrap_up,
     # wrap_up_complete will flip True and the frontend will auto-transition to

@@ -777,6 +777,7 @@ def test_force_quality_after_two_turns_without_eval(client, fake_openrouter):
     r3 = client.post("/chat", json={"session_id": sid, "message": "nothing"})
 
     from app import session as session_mod
+    from app.chat import WRAP_UP_GRACEFUL_CLOSE
     session = session_mod.get(sid)
     # Pending index cleared by force.
     assert session.pending_reflection_index is None
@@ -785,6 +786,10 @@ def test_force_quality_after_two_turns_without_eval(client, fake_openrouter):
     assert rp.quality == "decent"
     # And wrap_up_complete is now True so the frontend can transition.
     assert r3.json()["wrap_up_complete"] is True
+    # The agent's "Go on." dangling reply gets replaced with the canonical
+    # graceful close so the auto-transition to WrapUpView doesn't cut a stale
+    # message mid-screen.
+    assert r3.json()["reply"] == WRAP_UP_GRACEFUL_CLOSE
 
 
 def test_force_quality_does_not_fire_on_first_unevaluated_turn(client, fake_openrouter):
