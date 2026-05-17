@@ -281,6 +281,94 @@ class ChatResponse(BaseModel):
 
 _MAX_TOOL_ITERATIONS = 3
 
+# Retries for the full call_tutor + AgentResponse.model_validate cycle when the
+# model returns malformed JSON, hits an HTTP error, or emits a schema-invalid
+# payload. Each retry re-calls OpenRouter (with a corrective system note)
+# instead of surfacing the failure to the user as a chat reply.
+_MAX_LLM_RETRIES: int = max(1, int(os.environ.get("LLM_MAX_RETRIES", "3")))
+
+
+async def _call_tutor_validated(
+    messages: list[dict],
+    session_id: str,
+    temperature: float | None,
+    max_retries: int = _MAX_LLM_RETRIES,
+) -> tuple["AgentResponse", dict, dict]:
+    """Call `llm.call_tutor` and validate against `AgentResponse`, retrying the
+    whole cycle on JSON parse failure, transport errors, or Pydantic validation
+    failure. Returns (parsed, raw_dict, accumulated_token_usage).
+
+    On exhaustion, raises HTTPException(502). Caller is expected to convert that
+    into an error event (SSE) or propagate as a 502 (JSON path) — but only after
+    the model has been given `max_retries` chances to produce a valid response.
+    """
+    accum_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    last_err: str | None = None
+    last_err_kind: str | None = None  # "json" | "schema" | "transport"
+    for attempt in range(max_retries):
+        try_messages = messages
+        if attempt > 0 and last_err:
+            if last_err_kind == "schema":
+                note = (
+                    "Your previous response did not match the required schema. "
+                    f"Validation error: {last_err[:300]}. "
+                    "Reply again as a single JSON object with keys "
+                    "{thinking, reply, control, signal} and correct field types. "
+                    "No prose, no markdown."
+                )
+            else:
+                note = (
+                    "Your previous response could not be processed "
+                    f"({last_err_kind or 'unknown'}: {last_err[:300]}). "
+                    "Reply again as a single JSON object only — no prose, "
+                    "no markdown fences, no commentary."
+                )
+            try_messages = messages + [{"role": "system", "content": note}]
+
+        try:
+            raw, usage = await llm.call_tutor(
+                try_messages, session_id=session_id, temperature=temperature
+            )
+            for k in accum_usage:
+                accum_usage[k] += usage.get(k, 0)
+        except llm.LLMParseError as e:
+            last_err, last_err_kind = str(e), "json"
+            _log.warning(
+                "session=%s call_tutor JSON parse failure attempt %d/%d: %s",
+                session_id[:8], attempt + 1, max_retries, last_err[:200],
+            )
+            continue
+        except llm.LLMError as e:
+            last_err, last_err_kind = str(e), "transport"
+            _log.warning(
+                "session=%s call_tutor transport error attempt %d/%d: %s",
+                session_id[:8], attempt + 1, max_retries, last_err[:200],
+            )
+            continue
+
+        raw.pop("thinking", None)
+        try:
+            parsed = AgentResponse.model_validate(raw)
+            llm.mark_parse_result(session_id, True)
+            parsed.thinking = None
+            return parsed, raw, accum_usage
+        except Exception as e:
+            llm.mark_parse_result(session_id, False, str(e))
+            last_err, last_err_kind = str(e), "schema"
+            _log.warning(
+                "session=%s AgentResponse schema validation failure attempt %d/%d: %s",
+                session_id[:8], attempt + 1, max_retries, last_err[:200],
+            )
+            continue
+
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            f"Agent output invalid after {max_retries} retries "
+            f"(last error: {last_err_kind}): {last_err}"
+        ),
+    )
+
 
 def _build_messages(
     session: Session, persona_ctx: str, had_tool_result: bool = False
@@ -612,7 +700,9 @@ async def _run_chat_turn(
     last_tool_name: str | None = None  # tracks last executed tool for dedup
 
     for iteration in range(_MAX_TOOL_ITERATIONS):
-        raw, usage = await llm.call_tutor(messages, session_id=session.session_id, temperature=_TUTOR_TEMP)
+        parsed, raw, usage = await _call_tutor_validated(
+            messages, session_id=session.session_id, temperature=_TUTOR_TEMP,
+        )
         session.metrics.token_usage.add(usage)
         _log.info(
             "tokens iter=%d session=%s prompt=%d completion=%d | session_total=%d",
@@ -622,18 +712,6 @@ async def _run_chat_turn(
             usage["completion_tokens"],
             session.metrics.token_usage.total_tokens,
         )
-        # Strip `thinking` before parsing — it must never reach the frontend.
-        raw.pop("thinking", None)
-        try:
-            parsed = AgentResponse.model_validate(raw)
-            llm.mark_parse_result(session.session_id, True)
-        except Exception as e:  # pydantic.ValidationError or similar
-            llm.mark_parse_result(session.session_id, False, str(e))
-            raise HTTPException(
-                status_code=502,
-                detail=f"Agent output failed schema validation: {e}",
-            ) from e
-        parsed.thinking = None  # belt-and-suspenders: ensure field is never forwarded
 
         # Enforce tool_call / reply mutual exclusion.
         # If the agent wrote a multi-sentence reply alongside a tool_call, the
@@ -1098,39 +1176,44 @@ async def _chat_sse_generator(
                     full_raw = edata
                 elif etype == "error":
                     stream_error = edata
-                    break  # exit inner loop; fall through to non-streaming retry
+                    break  # fall through to validated-retry fallback
 
-            if full_raw is None:
-                if stream_error is not None:
-                    # Streaming parse failed (usually truncated JSON at token limit).
-                    # Retry once with non-streaming call_tutor so the user never sees
-                    # the error. Any partial tokens already sent will be overwritten
-                    # when the state event arrives with the full reply.
+            parsed: AgentResponse | None = None
+            if full_raw is not None:
+                full_raw.pop("thinking", None)
+                try:
+                    parsed = AgentResponse.model_validate(full_raw)
+                    llm.mark_parse_result(session.session_id, True)
+                    parsed.thinking = None
+                except Exception as e:
+                    llm.mark_parse_result(session.session_id, False, str(e))
                     _log.warning(
-                        "session=%s SSE streaming parse failed, retrying non-streaming: %s",
+                        "session=%s SSE post-stream schema validation failed, "
+                        "falling back to validated non-streaming retries: %s",
+                        session.session_id[:8], str(e)[:200],
+                    )
+                    parsed = None
+
+            if parsed is None:
+                # Either the stream itself failed (HTTP/JSON), or the streamed
+                # output didn't validate against AgentResponse. Fall back to the
+                # validated non-streaming path so the user never sees the error.
+                # Any partial tokens already sent are overwritten by the final
+                # `state` event below.
+                if stream_error is not None:
+                    _log.warning(
+                        "session=%s SSE stream error, falling back to retries: %s",
                         session.session_id[:8], stream_error[:120],
                     )
-                    try:
-                        raw_dict, _ = await llm.call_tutor(
-                            messages, session_id=session.session_id, temperature=_TUTOR_TEMP
-                        )
-                        full_raw = raw_dict
-                    except Exception as retry_exc:
-                        yield _sse("error", {"message": f"Streaming failed and retry failed: {retry_exc}"})
-                        return
-                else:
-                    yield _sse("error", {"message": "No response received from model"})
+                try:
+                    parsed, _raw, _usage = await _call_tutor_validated(
+                        messages,
+                        session_id=session.session_id,
+                        temperature=_TUTOR_TEMP,
+                    )
+                except HTTPException as exc:
+                    yield _sse("error", {"code": exc.status_code, "message": exc.detail})
                     return
-
-            full_raw.pop("thinking", None)
-            try:
-                parsed = AgentResponse.model_validate(full_raw)
-                llm.mark_parse_result(session.session_id, True)
-            except Exception as e:
-                llm.mark_parse_result(session.session_id, False, str(e))
-                yield _sse("error", {"message": f"Agent output failed schema validation: {e}"})
-                return
-            parsed.thinking = None
 
             # Tool/reply mutual exclusion (same guard as JSON path).
             if parsed.control.tool_call is not None and parsed.reply:
