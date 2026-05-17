@@ -161,7 +161,7 @@ Set `VITE_USE_MOCK=true` to run fully in-browser without the backend.
 
 ```bash
 cd backend
-.venv/bin/pytest                                         # fast suite (126 tests, no LLM calls)
+.venv/bin/pytest                                         # fast suite (135 tests, no LLM calls)
 .venv/bin/pytest tests/test_socratic_constraints.py -v   # Socratic discipline regression harness
 .venv/bin/pytest --run-slow -v                           # include live-LLM probe tests (costs tokens)
 ```
@@ -250,7 +250,7 @@ Critique Mode is not yet implemented as a live session. Show it as a static walk
 
 ## Current state
 
-**Real and working:** full chat loop end-to-end (clarification → decomposition → solving → wrap-up), all FastAPI routes, domain detection, math tools (algebra + graph), expanded domain prompts (programming, essay, science), persona onboarding (two-step, confirm-new flow), thinking trace with understanding delta via LLM summariser, CalibrationCheck and ReflectionPrompt widgets, structured JSONL logging, split prompt architecture (`backend/app/prompts/v1/`), 17 probes covering Socratic constraints, 126 fast tests.
+**Real and working:** full chat loop end-to-end (clarification → decomposition → solving → wrap-up), all FastAPI routes, domain detection, math tools (algebra + graph), expanded domain prompts (programming, essay, science), persona onboarding (two-step, confirm-new flow), thinking trace with understanding delta via LLM summariser, CalibrationCheck and ReflectionPrompt widgets, structured JSONL logging, split prompt architecture (`backend/app/prompts/v1/`), 17 probes covering Socratic constraints, 135 fast tests. Wrap-up dialogue is now fully multi-turn: `wrap_up_complete` on `ChatResponse` gates the `WrapUpView` transition (no premature close), reply/directive XOR is enforced so calibration and reflection cards never appear alongside chat text, and `TraceReflections` renders the full reflection history in the thinking trace drawer.
 
 **Stubs/planned:** SSE streaming (chat currently returns full JSON), seeded dialogue tests, EC2 deployment, Critique Mode (designed, prompt-drafted in `critic_base.txt`).
 

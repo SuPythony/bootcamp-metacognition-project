@@ -106,10 +106,11 @@ def load_base_prompt(
     if had_tool_result:
         _maybe_append(blocks, folder / "block_tool_result.txt")
 
-    # Calibration block — injected when an open CalibrationPoint exists
-    # (student gave a confidence prediction but outcome not yet recorded).
+    # Calibration block — injected during the solving phase always (so the model
+    # can emit emit_calibration_check without a chicken-and-egg dependency), and
+    # also whenever an open CalibrationPoint exists (outcome not yet recorded).
     calibration_pts = getattr(session, "calibration_points", [])
-    if any(cp.outcome is None for cp in calibration_pts):
+    if phase == "solving" or any(cp.outcome is None for cp in calibration_pts):
         _maybe_append(blocks, folder / "block_calibration.txt")
 
     # Reflection-eval block — injected when the pending reflection has a student

@@ -991,6 +991,76 @@ def _maybe_queue_wrap_up_reflection(
     )
 
 
+async def _maybe_run_wrap_up_summarizer(session: Session) -> None:
+    """Run the wrap-up summariser (final_understanding + delta) exactly once
+    per session, at the first wrap_up turn. Results stored on session so
+    /thinking-trace can serve them without a second LLM call.
+
+    Guard: idempotent via wrap_up_summary_complete. Also skips if there's
+    nothing meaningful to summarise (no student messages at all).
+    """
+    if session.wrap_up_summary_complete:
+        return
+    recent = [
+        m["content"]
+        for m in session.message_history
+        if m.get("role") == "user" and not m["content"].startswith("[SYSTEM]")
+    ]
+    if not recent and not session.initial_understanding:
+        return
+    try:
+        summary = await llm.call_summarizer(
+            initial_understanding=session.initial_understanding,
+            recent_student_messages=recent,
+            session_id=session.session_id,
+        )
+        session.final_understanding = summary.get("final_understanding")
+        session.understanding_delta_label = summary.get("delta_label")
+        session.understanding_delta_evidence = summary.get("delta_evidence")
+    except Exception:
+        _log.warning(
+            "session=%s wrap-up summariser failed; final_understanding will be null",
+            session.session_id[:8],
+        )
+    session.wrap_up_summary_complete = True
+
+
+def _compute_calibration_summary(points: list) -> dict:
+    """Compute a calibration summary dict from a list of CalibrationPoint objects."""
+    OUTCOME_VAL: dict[str, int] = {"correct": 5, "partial": 3, "wrong": 1}
+    filled = [
+        (p.predicted_confidence, OUTCOME_VAL[p.outcome])
+        for p in points
+        if p.outcome is not None and p.outcome in OUTCOME_VAL
+    ]
+    if not filled:
+        return {"points": [], "label": None, "evidence": None}
+    over = sum(1 for pred, act in filled if pred > act)
+    under = sum(1 for pred, act in filled if pred < act)
+    calibrated = len(filled) - over - under
+    if calibrated >= over + under:
+        label = "well_calibrated"
+        evidence = "Your gut and your accuracy lined up most of the time."
+    elif over > under:
+        label = "overconfident"
+        evidence = "Your predictions sat above your outcomes more often than not."
+    elif under > over:
+        label = "underconfident"
+        evidence = "You knew more than your predictions said."
+    else:
+        label = "mixed"
+        evidence = "Your calibration varied across the session."
+    filled_pts = [p for p in points if p.outcome is not None and p.outcome in OUTCOME_VAL]
+    return {
+        "points": [
+            {"predicted": p.predicted_confidence, "outcome": p.outcome}
+            for p in filled_pts
+        ],
+        "label": label,
+        "evidence": evidence,
+    }
+
+
 async def _finalize_turn(
     session: Session,
     req: ChatRequest,
@@ -1056,6 +1126,18 @@ async def _finalize_turn(
             parsed.reply = reply_text + "\n\n" + WRAP_UP_SYNTHESIS_FALLBACK
 
     _apply_agent_response(session, parsed)
+
+    # Capture initial_understanding from signal.refined_query when the agent
+    # emits it (Step 2 of clarification). This is more accurate than capturing
+    # on phase transition — the agent synthesises the student's answer into
+    # refined_query, so we use it verbatim rather than re-summarising.
+    if (
+        parsed.signal is not None
+        and parsed.signal.refined_query
+        and session.initial_understanding is None
+    ):
+        session.initial_understanding = parsed.signal.refined_query
+
     _maybe_queue_wrap_up_reflection(session, parsed, previous_phase)
     _maybe_force_reflection_quality(session, parsed)
 
@@ -1083,8 +1165,6 @@ async def _finalize_turn(
 
     session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
 
-    await _maybe_capture_initial_understanding(session, previous_phase)
-
     onboarding_complete = False
     if session.domain == "persona" and session.phase == "wrap_up":
         persona_payload: dict = {}
@@ -1098,6 +1178,10 @@ async def _finalize_turn(
             session.username, persona_payload, session_id=session.session_id
         )
         onboarding_complete = True
+
+    # Run wrap-up summariser exactly once (Guard 1 + Guard 2).
+    if session.phase == "wrap_up" and not session.wrap_up_summary_complete:
+        await _maybe_run_wrap_up_summarizer(session)
 
     _write_chat_log({
         "event": "chat_turn",
@@ -1435,18 +1519,28 @@ async def thinking_trace(session_id: str) -> dict:
         if r.quality in quality_count:
             quality_count[r.quality] += 1
 
-    # Extract recent student messages for the summariser.
-    recent_student = [
-        m["content"]
-        for m in session.message_history
-        if m.get("role") == "user" and not m["content"].startswith("[SYSTEM]")
-    ]
-
-    summary = await llm.call_summarizer(
-        initial_understanding=session.initial_understanding,
-        recent_student_messages=recent_student,
-        session_id=session_id,
-    )
+    # Use stored summariser output when the session has already been through
+    # wrap_up (Guard 2 — only one summariser call per session). Fall back to
+    # calling the summariser inline for sessions that haven't reached wrap_up
+    # yet (e.g. thinking-trace called mid-session during development).
+    if session.wrap_up_summary_complete:
+        final_understanding = session.final_understanding
+        understanding_delta_label = session.understanding_delta_label
+        understanding_delta_evidence = session.understanding_delta_evidence
+    else:
+        recent_student = [
+            m["content"]
+            for m in session.message_history
+            if m.get("role") == "user" and not m["content"].startswith("[SYSTEM]")
+        ]
+        summary = await llm.call_summarizer(
+            initial_understanding=session.initial_understanding,
+            recent_student_messages=recent_student,
+            session_id=session_id,
+        )
+        final_understanding = summary["final_understanding"]
+        understanding_delta_label = summary["delta_label"]
+        understanding_delta_evidence = summary["delta_evidence"]
 
     return {
         "mode": session.mode,
@@ -1490,9 +1584,10 @@ async def thinking_trace(session_id: str) -> dict:
         "concepts_established": session.concepts_established,
         "decomposition_source": session.decomposition_source,
         "disengagement_count": session.disengagement_count,
-        "final_understanding": summary["final_understanding"],
-        "understanding_delta_label": summary["delta_label"],
-        "understanding_delta_evidence": summary["delta_evidence"],
+        "final_understanding": final_understanding,
+        "understanding_delta_label": understanding_delta_label,
+        "understanding_delta_evidence": understanding_delta_evidence,
+        "calibration_summary": _compute_calibration_summary(session.calibration_points),
     }
 
 

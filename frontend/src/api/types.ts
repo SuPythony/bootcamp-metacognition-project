@@ -136,6 +136,11 @@ export interface ThinkingTrace {
     predicted_confidence: number;
     outcome: "correct" | "wrong" | "partial" | null;
   }>;
+  calibration_summary?: {
+    points: Array<{ predicted: number; outcome: "correct" | "wrong" | "partial" }>;
+    label: "well_calibrated" | "overconfident" | "underconfident" | "mixed" | null;
+    evidence: string | null;
+  };
 }
 
 export interface StreamCallbacks {

@@ -60,18 +60,17 @@ def _new_session(client, fake_openrouter, opening_reply="What's your current thi
 # ---------------------------------------------------------------------------
 
 
-def test_initial_understanding_captured_on_clarification_exit(client, fake_openrouter, monkeypatch):
-    """When the agent transitions from clarification to decomposition,
-    initial_understanding is populated via the LLM summariser."""
-    from app import llm as llm_mod
-    monkeypatch.setattr(
-        llm_mod, "call_initial_understanding_summarizer",
-        AsyncMock(return_value="I think we need to isolate x."),
-    )
+def test_initial_understanding_captured_on_clarification_exit(client, fake_openrouter):
+    """When the agent emits signal.refined_query, initial_understanding is set
+    directly from that value (no LLM summariser)."""
     sid = _new_session(client, fake_openrouter)
 
     fake_openrouter.responses = [
-        _agent_reply("Great — let's break it down.", phase="decomposition"),
+        _agent_reply(
+            "Great — let's break it down.",
+            phase="decomposition",
+            refined_query="I think we need to isolate x.",
+        ),
     ]
     resp = client.post(
         "/chat",
@@ -85,23 +84,28 @@ def test_initial_understanding_captured_on_clarification_exit(client, fake_openr
     assert session.initial_understanding == "I think we need to isolate x."
 
 
-def test_initial_understanding_not_overwritten(client, fake_openrouter, monkeypatch):
-    """Once initial_understanding is set, subsequent turns must not overwrite it."""
-    from app import llm as llm_mod
-    monkeypatch.setattr(
-        llm_mod, "call_initial_understanding_summarizer",
-        AsyncMock(return_value="My first understanding."),
-    )
+def test_initial_understanding_not_overwritten(client, fake_openrouter):
+    """Once initial_understanding is set from refined_query, later turns that
+    also emit refined_query must not overwrite it."""
     sid = _new_session(client, fake_openrouter)
 
+    # First turn sets initial_understanding via refined_query.
     fake_openrouter.responses = [
-        _agent_reply("Good — let's break it down.", phase="decomposition"),
+        _agent_reply(
+            "Good — let's break it down.",
+            phase="decomposition",
+            refined_query="My first understanding.",
+        ),
     ]
     client.post("/chat", json={"session_id": sid, "message": "My first understanding."})
 
-    # Another turn in decomposition — summariser must not be called again.
+    # Second turn also emits refined_query — must not overwrite.
     fake_openrouter.responses = [
-        _agent_reply("What's the first subproblem?", phase="decomposition"),
+        _agent_reply(
+            "What's the first subproblem?",
+            phase="decomposition",
+            refined_query="A different framing.",
+        ),
     ]
     client.post("/chat", json={"session_id": sid, "message": "A second message."})
 

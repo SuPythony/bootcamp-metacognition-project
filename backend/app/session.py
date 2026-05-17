@@ -206,6 +206,11 @@ class Session(BaseModel):
     disengagement_count: int = 0
     refined_query: str | None = None
     verification_prompted_subproblems: list[str] = Field(default_factory=list)
+    # Wrap-up summariser output — stored once at wrap_up entry, served by /thinking-trace.
+    final_understanding: str | None = None
+    understanding_delta_label: str | None = None
+    understanding_delta_evidence: str | None = None
+    wrap_up_summary_complete: bool = False
 
     def active_subproblem(self) -> Subproblem | None:
         if self.active_subproblem_id is None:
