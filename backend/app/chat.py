@@ -145,6 +145,29 @@ WRAP_UP_SYNTHESIS_FALLBACK = (
     "in your own words?"
 )
 
+# Fallback close when the agent's reply on the wrap_up close turn is entirely
+# questions (and therefore stripped to empty).
+WRAP_UP_GRACEFUL_CLOSE = "Nice work today — take care, and see you next time."
+
+
+def _strip_trailing_questions(reply: str) -> str:
+    """Return `reply` truncated at the last sentence-terminator that isn't `?`.
+
+    Keeps everything up to and including the last `.` or `!`. Drops everything
+    after (the trailing question(s)). If no non-question terminator exists,
+    returns an empty string.
+
+    Used on the wrap_up close turn so the frontend's auto-transition to
+    WrapUpView doesn't cut the student off mid-question.
+    """
+    last_non_q = -1
+    for i, ch in enumerate(reply):
+        if ch in ".!":
+            last_non_q = i
+    if last_non_q == -1:
+        return ""
+    return reply[: last_non_q + 1].strip()
+
 
 # ---- Request / response models ----------------------------------------------
 
@@ -884,6 +907,29 @@ async def _finalize_turn(
 
     _apply_agent_response(session, parsed)
     _maybe_queue_wrap_up_reflection(session, parsed, previous_phase)
+
+    # Graceful close: when the agent emits last_reflection_quality in wrap_up,
+    # wrap_up_complete will flip True and the frontend will auto-transition to
+    # WrapUpView ~1.8s later. If the reply ends with another question, that
+    # question gets cut off — the student starts to read/type, then the view
+    # changes. Strip trailing questions so the close is clean.
+    quality_set = bool(
+        parsed.signal is not None and parsed.signal.last_reflection_quality
+    )
+    if (
+        quality_set
+        and session.phase == "wrap_up"
+        and parsed.reply
+        and "?" in parsed.reply
+    ):
+        cleaned = _strip_trailing_questions(parsed.reply)
+        if cleaned != parsed.reply:
+            _log.warning(
+                "session=%s wrap_up close had trailing question — stripped for graceful exit",
+                session.session_id[:8],
+            )
+            parsed.reply = cleaned or WRAP_UP_GRACEFUL_CLOSE
+
     session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
 
     await _maybe_capture_initial_understanding(session, previous_phase)

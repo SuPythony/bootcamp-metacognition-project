@@ -548,3 +548,104 @@ def test_synthesis_safety_net_skips_when_synthesis_cue_present(client, fake_open
     reply = resp.json()["reply"]
     # Only one synthesis cue — the safety-net didn't duplicate.
     assert reply.lower().count("walk me through") == 1
+
+
+# ---------------------------------------------------------------------------
+# Flow 6: graceful close — strip trailing questions on the close turn so the
+# WrapUpView transition doesn't cut the student off mid-question.
+# ---------------------------------------------------------------------------
+
+
+def _drive_to_close_turn(client, fake_openrouter, sid):
+    """Helper: advance the session to the turn where the wrap_up reflection is
+    pending. Caller then sends the close turn with last_reflection_quality."""
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+    # Turn 1: entry into wrap_up.
+    fake_openrouter.responses = [
+        _agent_reply("Walk me through it in your own words.", phase="wrap_up"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+    # Turn 2: backend queues wrap_up reflection.
+    fake_openrouter.responses = [_agent_reply("Anything more?")]
+    client.post("/chat", json={"session_id": sid, "message": "I subtracted then divided."})
+
+
+def test_close_turn_strips_trailing_question(client, fake_openrouter):
+    """When the agent emits last_reflection_quality but ALSO asks another question,
+    the trailing question must be stripped so the WrapUpView transition is clean."""
+    sid = _new_session(client, fake_openrouter)
+    _drive_to_close_turn(client, fake_openrouter, sid)
+
+    fake_openrouter.responses = [
+        _agent_reply(
+            "I see what you mean. To be really specific, what are the three rules?",
+            last_reflection_quality="shallow",
+        ),
+    ]
+    resp = client.post("/chat", json={"session_id": sid, "message": "I learned to isolate x."})
+    assert resp.status_code == 200
+    body = resp.json()
+    # wrap_up_complete must be True now (quality recorded).
+    assert body["wrap_up_complete"] is True
+    # The trailing question must be gone.
+    assert "?" not in body["reply"]
+    # The leading declarative sentence is preserved.
+    assert "I see what you mean." in body["reply"]
+
+
+def test_close_turn_preserves_question_free_reply(client, fake_openrouter):
+    """When the agent's close reply is already question-free, it passes through unchanged."""
+    sid = _new_session(client, fake_openrouter)
+    _drive_to_close_turn(client, fake_openrouter, sid)
+
+    clean_close = "Nice reflection — that move from intuition to formal criteria will stick."
+    fake_openrouter.responses = [
+        _agent_reply(clean_close, last_reflection_quality="decent"),
+    ]
+    resp = client.post("/chat", json={"session_id": sid, "message": "I learned to isolate x."})
+    assert resp.json()["reply"] == clean_close
+    assert resp.json()["wrap_up_complete"] is True
+
+
+def test_close_turn_falls_back_when_reply_is_only_questions(client, fake_openrouter):
+    """If the close reply is ENTIRELY questions, stripping yields empty — fall back
+    to the canonical graceful-close phrase."""
+    from app.chat import WRAP_UP_GRACEFUL_CLOSE
+
+    sid = _new_session(client, fake_openrouter)
+    _drive_to_close_turn(client, fake_openrouter, sid)
+
+    fake_openrouter.responses = [
+        _agent_reply(
+            "What are the three rules? Can you list them now?",
+            last_reflection_quality="shallow",
+        ),
+    ]
+    resp = client.post("/chat", json={"session_id": sid, "message": "I learned to isolate x."})
+    assert resp.json()["reply"] == WRAP_UP_GRACEFUL_CLOSE
+    assert resp.json()["wrap_up_complete"] is True
+
+
+def test_close_turn_no_strip_outside_wrap_up(client, fake_openrouter):
+    """last_reflection_quality emitted OUTSIDE wrap_up (e.g. periodic reflection in
+    solving) must NOT strip questions — the agent may legitimately follow up."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+    # Session is in solving after _advance_to_wrap_up — emit periodic reflection.
+    fake_openrouter.responses = [
+        _agent_reply(None, emit_reflection="periodic"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "Step 1 done."})
+
+    # Student answers the periodic reflection; agent evaluates quality AND continues
+    # with another question (legitimate mid-session pattern).
+    fake_openrouter.responses = [
+        _agent_reply(
+            "Good catch. So what's the next step?",
+            last_reflection_quality="decent",
+        ),
+    ]
+    resp = client.post("/chat", json={"session_id": sid, "message": "I noticed I almost forgot."})
+    # The follow-up question survives — we only strip in wrap_up.
+    assert "?" in resp.json()["reply"]
+    assert resp.json()["wrap_up_complete"] is False
