@@ -133,12 +133,23 @@ def _compute(
 
 def _op_simplify(expression: str, _variable: str | None) -> tuple[list[dict], str]:
     expr = _parse(expression)
-    steps: list[dict] = [{"expr": _fmt(expr), "rule": "original expression"}]
 
-    # Collect like terms: sympy may already have done this on parse
+    # For constant expressions (no free symbols) sympy evaluates immediately on
+    # parse, so _fmt(expr) is already the answer.  Show the raw input as the
+    # starting step so the student sees what was computed, not just "0 → 0".
+    is_constant = not expr.free_symbols
+    first_label = expression if is_constant else _fmt(expr)
+    steps: list[dict] = [{"expr": first_label, "rule": "original expression"}]
+
+    # Collect like terms: sympy may already have done this on parse.
+    # Skip for constant expressions — the evaluate step below covers it.
     parsed_str = _fmt(expr)
-    if parsed_str != expression:
+    if not is_constant and parsed_str != expression:
         steps.append({"expr": parsed_str, "rule": "collect like terms"})
+
+    if is_constant:
+        steps.append({"expr": parsed_str, "rule": "evaluate"})
+        return steps, parsed_str
 
     working = expr
 
