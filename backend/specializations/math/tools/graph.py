@@ -48,9 +48,38 @@ def run(args: dict, session: Any) -> dict:
     raw_expr = args.get("expression") or ""
     # LLM may pass a list of expressions to overlay on one plot (e.g. ["2x+3", "7"]).
     if isinstance(raw_expr, list):
-        expressions = [str(e).strip() for e in raw_expr if str(e).strip()]
+        raw_list = [str(e).strip() for e in raw_expr if str(e).strip()]
     else:
-        expressions = [str(raw_expr).strip()]
+        # LLM sometimes JSON-encodes the list as a string: "[20-2x, (60-4x)/3]".
+        # Try JSON parse first; fall back to treating as a single expression string.
+        s = str(raw_expr).strip()
+        if s.startswith("["):
+            import json as _json
+            try:
+                decoded = _json.loads(s)
+                if isinstance(decoded, list):
+                    raw_list = [str(e).strip() for e in decoded if str(e).strip()]
+                else:
+                    raw_list = [s]
+            except _json.JSONDecodeError:
+                raw_list = [s]
+        else:
+            raw_list = [s]
+
+    # LLM sometimes passes comma-separated expressions as a single string
+    # (e.g. "26-2x, (60-2x)/3") or a string list "[26-2x, (60-2x)/3]".
+    # parse_expr returns a tuple or list in those cases — expand into separate curves.
+    expressions: list[str] = []
+    for expr_str in raw_list:
+        try:
+            parsed = parse_expr(expr_str, local_dict=_LOCALS, transformations=_TRANSFORMS)
+        except Exception:
+            expressions.append(expr_str)
+            continue
+        if isinstance(parsed, (tuple, list)):
+            expressions.extend(str(e) for e in parsed)
+        else:
+            expressions.append(expr_str)
 
     if not expressions:
         return _error("No expression provided")
@@ -102,14 +131,47 @@ def _error(msg: str) -> dict:
 def _eval_expr(expression: str, x_vals: np.ndarray, variables: dict) -> np.ndarray:
     """Parse and evaluate one expression over x_vals; returns y array (NaN where undefined)."""
     sym_expr = parse_expr(expression, local_dict=_LOCALS, transformations=_TRANSFORMS)
+
+    # Reject comma-tuple or list expressions that slipped through (safety net).
+    if isinstance(sym_expr, (tuple, list)):
+        raise ValueError(
+            f"Expression '{expression}' contains multiple comma-separated values. "
+            "Pass each expression as a separate list item instead."
+        )
+
     subs = {Symbol(k): float(v) for k, v in variables.items() if k != "x"}
     if subs:
         sym_expr = sym_expr.subs(subs)
+
+    # Warn if the expression contains free symbols other than x — those won't be
+    # substituted and will produce an error or unexpected output.
+    free = sym_expr.free_symbols - {Symbol("x")}
+    if free:
+        free_names = ", ".join(sorted(str(s) for s in free))
+        raise ValueError(
+            f"Expression '{expression}' contains variables other than x: {free_names}. "
+            "Express the curve as y = f(x) only "
+            "(e.g. to plot 2x+y=26 solve for y: '26 - 2*x')."
+        )
+
     f = lambdify(Symbol("x"), sym_expr, modules=["numpy"])
     with np.errstate(divide="ignore", invalid="ignore"):
         raw = f(x_vals)
-    # Constants (e.g. y=7) return a scalar — broadcast to match x_vals shape.
-    y_vals = np.broadcast_to(np.asarray(raw, dtype=complex), x_vals.shape).copy()
+
+    # Normalise to 1-D before broadcasting. lambdify can return:
+    #   • a Python scalar (constant expression like y=7)
+    #   • a 1-D numpy array (normal case)
+    #   • a tuple / 2-D array when the expression contained commas or Piecewise quirks
+    raw_arr = np.asarray(raw, dtype=complex)
+    if raw_arr.ndim > 1:
+        raw_arr = raw_arr.squeeze()
+    if raw_arr.ndim > 1 or (raw_arr.ndim == 1 and raw_arr.shape != x_vals.shape):
+        raise ValueError(
+            f"Expression '{expression}' produced output shape {np.asarray(raw).shape} "
+            f"(expected {x_vals.shape}). Make sure the expression is a function of x only."
+        )
+
+    y_vals = np.broadcast_to(raw_arr, x_vals.shape).copy()
     real_mask = np.isreal(y_vals)
     complex_fraction = (~real_mask).sum() / max(len(y_vals), 1)
     if complex_fraction > 0.1:
