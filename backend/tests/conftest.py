@@ -100,6 +100,21 @@ def fake_openrouter(monkeypatch):
         "call_initial_understanding_summarizer",
         _noop_initial_summarizer,
     )
+
+    # By default, the wrap-up summariser is a no-op in tests so existing
+    # fixtures that drive sessions to wrap_up don't need to queue an extra
+    # _post_chat response. Tests that exercise the summariser output override
+    # this monkeypatch directly.
+    async def _noop_summarizer(
+        initial_understanding, recent_student_messages, session_id="x", temperature=0.3
+    ):
+        return {
+            "final_understanding": None,
+            "delta_label": None,
+            "delta_evidence": None,
+        }
+
+    monkeypatch.setattr(llm_mod, "call_summarizer", _noop_summarizer)
     return rec
 
 

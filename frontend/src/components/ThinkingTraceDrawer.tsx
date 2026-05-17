@@ -2,6 +2,7 @@ import type { ThinkingTrace } from "../api/types";
 import { TraceHero } from "./trace/TraceHero";
 import { TraceTimeline } from "./trace/TraceTimeline";
 import { CalibrationPlot } from "./trace/CalibrationPlot";
+import { TraceReflections } from "./trace/TraceReflections";
 import { TraceNumbers } from "./trace/TraceNumbers";
 import { TraceFooter } from "./trace/TraceFooter";
 
@@ -19,6 +20,7 @@ export default function ThinkingTraceDrawer({
       <TraceHero trace={trace} domain={domain} dateISO={dateISO} />
       <TraceTimeline trace={trace} />
       <CalibrationPlot trace={trace} />
+      <TraceReflections trace={trace} />
       <TraceNumbers trace={trace} />
       <TraceFooter trace={trace} dateISO={dateISO} />
     </article>

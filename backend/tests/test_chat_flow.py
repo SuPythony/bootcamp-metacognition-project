@@ -879,27 +879,19 @@ def test_thinking_trace_includes_signal_derived_fields(client, fake_openrouter):
 # ---- initial_understanding capture ------------------------------------------
 
 
-def test_initial_understanding_captured_on_clarification_exit(
-    client, fake_openrouter, monkeypatch
+def test_initial_understanding_captured_from_refined_query(
+    client, fake_openrouter
 ):
-    """When the session leaves clarification, the backend invokes
-    call_initial_understanding_summarizer and stores the result on the session."""
-    from app import llm as llm_mod
-
-    calls: list[list[str]] = []
-
-    async def fake_summarizer(*, clarification_student_messages, session_id):
-        calls.append(list(clarification_student_messages))
-        return "You came in thinking it was about isolating x by moving terms."
-
-    monkeypatch.setattr(
-        llm_mod, "call_initial_understanding_summarizer", fake_summarizer
-    )
-
+    """When the agent emits signal.refined_query, initial_understanding is set
+    directly from that value — no LLM summariser call."""
     fake_openrouter.responses = [
         _classifier_reply("math"),
         _agent_reply("What's your initial read?"),
-        _agent_reply("Got it. Let's plan.", phase="decomposition"),
+        _agent_reply(
+            "Got it. Let's plan.",
+            phase="decomposition",
+            refined_query="I think I just isolate x",
+        ),
     ]
     new = client.post(
         "/session/new",
@@ -913,36 +905,29 @@ def test_initial_understanding_captured_on_clarification_exit(
 
     from app import session as session_mod
     s = session_mod.get(sid)
-    assert s.initial_understanding == (
-        "You came in thinking it was about isolating x by moving terms."
-    )
-    assert len(calls) == 1
-    assert any("isolate x" in m for m in calls[0])
+    assert s.initial_understanding == "I think I just isolate x"
 
 
 def test_initial_understanding_capture_is_idempotent(
-    client, fake_openrouter, monkeypatch
+    client, fake_openrouter
 ):
-    """Once initial_understanding is set, later phase transitions must NOT call
-    the summariser again."""
-    from app import llm as llm_mod
-
-    call_count = 0
-
-    async def fake_summarizer(*, clarification_student_messages, session_id):
-        nonlocal call_count
-        call_count += 1
-        return "You started with a partial framing."
-
-    monkeypatch.setattr(
-        llm_mod, "call_initial_understanding_summarizer", fake_summarizer
-    )
-
+    """Once initial_understanding is set from the first refined_query, later
+    turns that also emit refined_query must NOT overwrite it."""
     fake_openrouter.responses = [
         _classifier_reply("math"),
         _agent_reply("What's your initial read?"),
-        _agent_reply("Onto decomposition.", phase="decomposition"),
-        _agent_reply("And solving.", phase="solving"),
+        # First refined_query — sets initial_understanding.
+        _agent_reply(
+            "Onto decomposition.",
+            phase="decomposition",
+            refined_query="I think I just isolate x",
+        ),
+        # Later turn also emits refined_query — must not overwrite.
+        _agent_reply(
+            "And solving.",
+            phase="solving",
+            refined_query="Different framing now",
+        ),
         _agent_reply("Wrapping up.", phase="wrap_up"),
     ]
     new = client.post(
@@ -954,53 +939,47 @@ def test_initial_understanding_capture_is_idempotent(
     client.post("/chat", json={"session_id": sid, "message": "next part"})
     client.post("/chat", json={"session_id": sid, "message": "all done"})
 
-    assert call_count == 1, f"summariser called {call_count} times; expected 1"
-
-
-def test_initial_understanding_skipped_when_phase_does_not_leave_clarification(
-    client, fake_openrouter, monkeypatch
-):
-    """If the agent stays in clarification, the summariser must not be called."""
-    from app import llm as llm_mod
-
-    call_count = 0
-
-    async def fake_summarizer(*, clarification_student_messages, session_id):
-        nonlocal call_count
-        call_count += 1
-        return "should not happen"
-
-    monkeypatch.setattr(
-        llm_mod, "call_initial_understanding_summarizer", fake_summarizer
+    from app import session as session_mod
+    s = session_mod.get(sid)
+    assert s.initial_understanding == "I think I just isolate x", (
+        f"initial_understanding was overwritten to {s.initial_understanding!r}"
     )
 
+
+def test_initial_understanding_skipped_when_refined_query_absent(
+    client, fake_openrouter
+):
+    """If the agent never emits signal.refined_query, initial_understanding stays None."""
     fake_openrouter.responses = [
         _classifier_reply("math"),
         _agent_reply("What's your initial read?"),
-        _agent_reply("Tell me more first."),  # still clarification
+        _agent_reply("Tell me more first."),  # no refined_query in signal
     ]
     new = client.post(
         "/session/new",
         json={"username": "alice", "mode": "solving", "query": "x+1=2"},
     ).json()
-    client.post(
-        "/chat", json={"session_id": new["session_id"], "message": "I'm not sure"}
-    )
+    sid = new["session_id"]
+    client.post("/chat", json={"session_id": sid, "message": "I'm not sure"})
 
-    assert call_count == 0
+    from app import session as session_mod
+    s = session_mod.get(sid)
+    assert s.initial_understanding is None
 
 
 def test_thinking_trace_surfaces_captured_initial_understanding(
     client, fake_openrouter, monkeypatch
 ):
-    """The /thinking-trace response must include the captured initial_understanding."""
+    """The /thinking-trace response must include the captured initial_understanding.
+
+    initial_understanding is set from signal.refined_query. final_understanding
+    comes from call_summarizer (called inline by /thinking-trace when the session
+    hasn't reached wrap_up yet).
+    """
     from app import llm as llm_mod
 
-    async def fake_initial(*, clarification_student_messages, session_id):
-        return "You came in thinking it was about isolating x."
-
     async def fake_summary(
-        *, initial_understanding, recent_student_messages, session_id="x"
+        initial_understanding, recent_student_messages, session_id="x", temperature=0.3
     ):
         return {
             "final_understanding": "You worked out the inverse-operations step.",
@@ -1008,15 +987,16 @@ def test_thinking_trace_surfaces_captured_initial_understanding(
             "delta_evidence": "You moved from raw isolation to inverse operations.",
         }
 
-    monkeypatch.setattr(
-        llm_mod, "call_initial_understanding_summarizer", fake_initial
-    )
     monkeypatch.setattr(llm_mod, "call_summarizer", fake_summary)
 
     fake_openrouter.responses = [
         _classifier_reply("math"),
         _agent_reply("What's your initial read?"),
-        _agent_reply("Onto decomposition.", phase="decomposition"),
+        _agent_reply(
+            "Onto decomposition.",
+            phase="decomposition",
+            refined_query="I came in thinking isolate x",
+        ),
     ]
     new = client.post(
         "/session/new",
@@ -1028,12 +1008,8 @@ def test_thinking_trace_surfaces_captured_initial_understanding(
     resp = client.get(f"/session/{sid}/thinking-trace")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["initial_understanding"] == (
-        "You came in thinking it was about isolating x."
-    )
-    assert body["final_understanding"] == (
-        "You worked out the inverse-operations step."
-    )
+    assert body["initial_understanding"] == "I came in thinking isolate x"
+    assert body["final_understanding"] == "You worked out the inverse-operations step."
     assert body["understanding_delta_label"] == "moderate"
 
 
