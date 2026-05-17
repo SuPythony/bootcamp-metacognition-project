@@ -103,7 +103,9 @@ def load_specializations() -> None:
     Idempotent across calls — resets the registry before scanning so that
     test fixtures and reloads behave predictably.
     """
+    global _BASE_PROMPT
     _REGISTRY.clear()
+    _BASE_PROMPT = None  # invalidate cached base prompt so edits are picked up
     for child in sorted(SPECIALIZATIONS_DIR.iterdir()):
         if not child.is_dir():
             continue

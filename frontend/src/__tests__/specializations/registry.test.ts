@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { lookup, has } from "../../specializations/registry";
+import { lookup, has, _resetLookupWarningsForTests } from "../../specializations/registry";
 
 describe("specializations registry", () => {
   it("resolves general.CalibrationCheck", () => {
@@ -24,6 +24,7 @@ describe("specializations registry", () => {
   describe("unknown component", () => {
     let warnSpy: ReturnType<typeof vi.spyOn>;
     beforeEach(() => {
+      _resetLookupWarningsForTests();
       warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     });
     afterEach(() => {
@@ -38,6 +39,19 @@ describe("specializations registry", () => {
     it("logs a warning for unknown key", () => {
       lookup("math.NotAComponent");
       expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it("dedups warnings for the same key (only logs once)", () => {
+      lookup("math.AnotherMissing");
+      lookup("math.AnotherMissing");
+      lookup("math.AnotherMissing");
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("has() never warns even for missing keys", () => {
+      has("math.SilentMiss");
+      has("math.SilentMiss");
+      expect(warnSpy).not.toHaveBeenCalled();
     });
   });
 });

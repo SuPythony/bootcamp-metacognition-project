@@ -49,10 +49,15 @@ def run(args: dict, session: Any) -> dict:
     # LLM may pass a list of expressions to overlay on one plot (e.g. ["2x+3", "7"]).
     if isinstance(raw_expr, list):
         expressions = [str(e).strip() for e in raw_expr if str(e).strip()]
+    elif isinstance(raw_expr, dict):
+        return _error(
+            "'expression' must be a string or list of strings, not a dict. "
+            "Pass the formula directly, e.g. expression='x**2 + 1'."
+        )
     else:
         expressions = [str(raw_expr).strip()]
 
-    if not expressions:
+    if not expressions or not any(expressions):
         return _error("No expression provided")
 
     x_range = args.get("x_range") or [-10, 10]
@@ -105,6 +110,16 @@ def _eval_expr(expression: str, x_vals: np.ndarray, variables: dict) -> np.ndarr
     subs = {Symbol(k): float(v) for k, v in variables.items() if k != "x"}
     if subs:
         sym_expr = sym_expr.subs(subs)
+    # After substitution, only x may remain as a free symbol. Validate up front
+    # so the failure message is actionable rather than a raw lambdify NameError
+    # surfaced from inside the numpy errstate block.
+    remaining = {s for s in sym_expr.free_symbols if s.name != "x"}
+    if remaining:
+        names = ", ".join(sorted(s.name for s in remaining))
+        raise ValueError(
+            f"Expression '{expression}' has unresolved symbols: {names}. "
+            f"Provide values via the variables argument, e.g. variables={{'{next(iter(sorted(s.name for s in remaining)))}': 1.0}}."
+        )
     f = lambdify(Symbol("x"), sym_expr, modules=["numpy"])
     with np.errstate(divide="ignore", invalid="ignore"):
         raw = f(x_vals)

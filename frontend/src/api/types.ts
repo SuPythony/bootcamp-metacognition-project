@@ -33,9 +33,11 @@ export interface UIDirective {
 
 export interface ToolCall {
   name: string;
+  result?: unknown;
   ui_component?: string;
   display_data?: Record<string, unknown>;
   args?: Record<string, unknown>;
+  execution?: "backend" | "frontend";
 }
 
 export interface ChatResponse {
@@ -66,28 +68,37 @@ export interface ChatRequest {
   session_id: string;
   message?: string;
   directive_response?: { component: string; value: unknown };
+  tool_result?: {
+    name: string;
+    result?: unknown;
+    display_data?: unknown;
+    error?: string | null;
+  };
+}
+
+// Inferred persona field — wraps a value with provenance.
+// Backend uses these objects for any field captured passively from chat
+// (vs. answered explicitly during onboarding).
+export interface PersonaField<T = string> {
+  value: T;
+  inferred: boolean;
+  evidence?: string | null;
 }
 
 export interface Persona {
   username: string;
   created_at: string;
-  education_level:
-    | "undergraduate"
-    | "high_school"
-    | "self_taught"
-    | "professional"
-    | "other";
-  education_detail: string;
-  confident_subjects: string[];
-  difficult_subjects: string[];
-  learning_style:
-    | "examples_first"
-    | "theory_first"
-    | "trial_and_error"
-    | "mixed";
-  goals: string;
-  preferred_pace: "slow" | "medium" | "fast";
-  raw_responses: { question: string; answer: string }[];
+  // Flat strings — captured directly at onboarding.
+  age_band?: string | null;
+  school_level?: string | null;
+  initial_intent?: string | null;
+  // Inferred fields — present once the agent extracts them passively.
+  education_detail?: PersonaField | null;
+  confident_subjects?: PersonaField[];
+  difficult_subjects?: PersonaField[];
+  learning_style?: PersonaField | null;
+  preferred_pace?: PersonaField | null;
+  goals?: PersonaField | null;
 }
 
 export interface PersonaCreateResponse {
@@ -110,10 +121,10 @@ export interface ThinkingTrace {
   }>;
   direct_answers_requested: number;
   self_corrections: number;
-  initial_understanding: string;
-  final_understanding: string;
-  understanding_delta_label: "significant" | "moderate" | "small";
-  understanding_delta_evidence: string;
+  initial_understanding: string | null;
+  final_understanding: string | null;
+  understanding_delta_label: "significant" | "moderate" | "small" | null;
+  understanding_delta_evidence: string | null;
   reflection_prompts?: Array<{
     trigger: string;
     question: string;

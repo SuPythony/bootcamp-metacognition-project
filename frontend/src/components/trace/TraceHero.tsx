@@ -5,13 +5,15 @@ import MathText from "../MathText";
 import { Brandmark } from "../brand/Brandmark";
 import { HandDrawnRule } from "./HandDrawnRule";
 
-const DELTA_TEXT: Record<ThinkingTrace["understanding_delta_label"], string> = {
+type DeltaLabel = NonNullable<ThinkingTrace["understanding_delta_label"]>;
+
+const DELTA_TEXT: Record<DeltaLabel, string> = {
   significant: "significant shift",
   moderate: "moderate shift",
   small: "small shift",
 };
 
-const DELTA_TONE: Record<ThinkingTrace["understanding_delta_label"], string> = {
+const DELTA_TONE: Record<DeltaLabel, string> = {
   significant: "text-solved border-solved/40 bg-solved/10",
   moderate: "text-hint border-hint/40 bg-hint/10",
   small: "text-ink-soft border-rule bg-surface-muted",

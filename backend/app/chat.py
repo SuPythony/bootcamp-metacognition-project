@@ -727,7 +727,7 @@ async def _run_chat_turn(
                     session.session_id[:8], word_count, sentence_count,
                 )
                 correction_messages = messages + [
-                    {"role": "assistant", "content": str(raw)},
+                    {"role": "assistant", "content": json.dumps(raw)},
                     {
                         "role": "system",
                         "content": (
@@ -746,8 +746,10 @@ async def _run_chat_turn(
                 raw2.pop("thinking", None)
                 try:
                     parsed = AgentResponse.model_validate(raw2)
+                    llm.mark_parse_result(session.session_id, True)
                     parsed.thinking = None
-                except Exception:
+                except Exception as e:
+                    llm.mark_parse_result(session.session_id, False, str(e))
                     _log.warning(
                         "session=%s tool_call/reply retry failed to parse — using original",
                         session.session_id[:8],
@@ -1112,7 +1114,11 @@ async def _finalize_turn(
         ),
         "user_message": req.message,
         "agent_reply_preview": (parsed.reply or "")[:120],
-        "tool_called": (parsed.control.tool_call.get("name") if isinstance(parsed.control.tool_call, dict) else None),
+        "tool_called": (
+            backend_tool_result.get("name") if isinstance(backend_tool_result, dict) else
+            (frontend_tool.get("name") if isinstance(frontend_tool, dict) else
+             (parsed.control.tool_call.get("name") if isinstance(parsed.control.tool_call, dict) else None))
+        ),
         "phase_after": session.phase,
     })
     # wrap_up_complete: True once the reflection round-trip is done.
@@ -1163,6 +1169,7 @@ async def _chat_sse_generator(
         last_backend_tool_result: dict | None = None
         last_tool_name: str | None = None
 
+        tool_loop_exited_cleanly = False
         for iteration in range(_MAX_TOOL_ITERATIONS):
             # Stream the LLM call — emit token events as reply chars arrive.
             full_raw: dict | None = None
@@ -1227,6 +1234,7 @@ async def _chat_sse_generator(
                     parsed.reply = None
 
             if parsed.control.tool_call is None:
+                tool_loop_exited_cleanly = True
                 break
 
             tool_name = parsed.control.tool_call.get("name")
@@ -1237,6 +1245,7 @@ async def _chat_sse_generator(
 
             if tool_name == last_tool_name and last_backend_tool_result is not None:
                 _log.warning("session=%s (sse) duplicate tool call — breaking loop", session.session_id[:8])
+                tool_loop_exited_cleanly = True
                 break
 
             try:
@@ -1248,6 +1257,7 @@ async def _chat_sse_generator(
             if dispatch["execution"] == "frontend":
                 session.pending_frontend_tool = dispatch
                 # Surface to client via state event below; no more LLM calls needed.
+                tool_loop_exited_cleanly = True
                 break
 
             assistant_msg = {"role": "assistant", "content": parsed.reply or ""}
@@ -1270,6 +1280,16 @@ async def _chat_sse_generator(
             messages.append(tool_msg)
             session.message_history.append(tool_msg)
             # Loop: next iteration streams the post-tool reply.
+
+        if not tool_loop_exited_cleanly:
+            yield _sse(
+                "error",
+                {
+                    "code": 502,
+                    "message": f"Tool-call loop exceeded {_MAX_TOOL_ITERATIONS} iterations",
+                },
+            )
+            return
 
         frontend_tool = session.pending_frontend_tool if hasattr(session, "pending_frontend_tool") and session.pending_frontend_tool else None
 

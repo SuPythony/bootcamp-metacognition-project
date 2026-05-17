@@ -239,7 +239,7 @@ async def persona_create(req: PersonaCreateRequest) -> PersonaCreateResponse:
     parsed, _, _ = await _run_chat_turn(session)
     session.phase = _validate_phase(session, parsed.control.phase)
     _apply_agent_response(session, parsed)
-    session.message_history.append({"role": "assistant", "content": parsed.reply})
+    session.message_history.append({"role": "assistant", "content": parsed.reply or ""})
     session_mod.put(session)
 
     return PersonaCreateResponse(

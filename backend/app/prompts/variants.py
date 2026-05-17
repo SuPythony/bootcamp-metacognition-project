@@ -182,7 +182,20 @@ def parse_domain_variants(env_value: str) -> dict[str, str]:
                 "expected '<domain>:<version>' (e.g. 'math:v2')."
             )
         domain, _, version = entry.rpartition(":")
-        result[domain] = f"{domain}:{version}"
+        if not domain or not version:
+            raise ValueError(
+                f"Invalid PROMPT_VARIANT_DOMAIN entry {entry!r}: "
+                "both '<domain>' and '<version>' must be non-empty "
+                "(e.g. 'math:v2')."
+            )
+        key = f"{domain}:{version}"
+        if key not in VARIANTS:
+            raise ValueError(
+                f"Invalid PROMPT_VARIANT_DOMAIN entry {entry!r}: "
+                f"variant key {key!r} is not registered in VARIANTS. "
+                f"Known keys: {sorted(VARIANTS.keys())!r}"
+            )
+        result[domain] = key
     return result
 
 

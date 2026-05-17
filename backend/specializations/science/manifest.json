@@ -5,15 +5,15 @@
   "tools": [
     {
       "name": "graph",
-      "description": "Plot student-provided data.",
+      "description": "Plot a mathematical expression over a numeric range.",
       "execution": "backend",
       "endpoint": "/tools/graph",
       "ui_component": "GraphView",
       "input_schema": {
-        "x": "number[]",
-        "y": "number[]",
-        "x_label": "string?",
-        "y_label": "string?"
+        "expression": "string",
+        "x_range": "[number, number]",
+        "variables": "object?",
+        "caption": "string?"
       }
     },
     {
