@@ -15,13 +15,13 @@ def run(args: dict, session) -> dict:
 
     if not isinstance(columns, list):
         return {
-            "result": "error: 'columns' must be a list of strings",
+            "result": "Error: 'columns' must be a list of strings",
             "display_data": {},
             "ui_component": "DataTable",
         }
     if not isinstance(rows, list):
         return {
-            "result": "error: 'rows' must be a list of lists",
+            "result": "Error: 'rows' must be a list of lists",
             "display_data": {},
             "ui_component": "DataTable",
         }
