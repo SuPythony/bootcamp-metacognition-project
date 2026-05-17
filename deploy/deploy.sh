@@ -42,7 +42,13 @@ echo "==> Building frontend"
 cd "$APP_DIR/frontend"
 # Unset any inherited Vite vars so .env.production wins predictably.
 unset VITE_API_URL VITE_USE_MOCK
-npm ci
+# Using `npm install --no-package-lock` instead of `npm ci`: modern npm
+# (>=9) has a platform-filter bug with esbuild's optional per-OS sub-deps
+# (e.g. @esbuild/netbsd-arm64) that makes `npm ci` fail with EBADPLATFORM
+# on linux-arm64 boxes. `npm install` correctly skips OS-mismatched
+# optional deps; --no-package-lock keeps the box's lock file pristine so
+# git pull --ff-only stays clean on the next deploy.
+npm install --no-package-lock --no-audit --no-fund
 npm run build
 
 echo "==> Publishing static bundle"
