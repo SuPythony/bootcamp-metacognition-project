@@ -1582,7 +1582,7 @@ Files:
 First deploy (one-time):
 
 ```
-ssh ubuntu@$APP_HOSTNAME
+ssh user@$APP_HOSTNAME
 # clone repo to $APP_DIR (default /opt/aporeka/app), then:
 cp deploy/deploy.env.example deploy/deploy.env  # edit APP_HOSTNAME + ADMIN_EMAIL
 sudo bash deploy/bootstrap.sh
@@ -1595,7 +1595,7 @@ sudo systemctl enable aporeka             # survive reboots
 Every subsequent deploy:
 
 ```
-ssh ubuntu@$APP_HOSTNAME && cd $APP_DIR && bash deploy/deploy.sh
+ssh user@$APP_HOSTNAME && cd $APP_DIR && bash deploy/deploy.sh
 ```
 
 Sub-minute for code-only changes; ~2 min when deps change. CI/CD is out of scope for v1.

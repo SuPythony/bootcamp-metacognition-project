@@ -208,7 +208,7 @@ sudo systemctl enable aporeka
 Every subsequent deploy:
 
 ```bash
-ssh ubuntu@$APP_HOSTNAME && cd $APP_DIR && bash deploy/deploy.sh
+ssh user@$APP_HOSTNAME && cd $APP_DIR && bash deploy/deploy.sh
 ```
 
 Nginx is configured with SSE-ready directives so the future streaming work needs no infra changes. `OPENROUTER_API_KEY` lives in `/etc/aporeka.env` (`chmod 600`), never in the repo. See `CLAUDE.md` § Deployment for the full file map and rationale.
