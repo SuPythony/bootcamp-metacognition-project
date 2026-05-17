@@ -5,8 +5,15 @@ REFLECTION RESPONSE RECEIVED
 The student has just responded to a reflection prompt. Evaluate their response
 and set signal.last_reflection_quality on this turn.
 
-The turn that delivered the reflection prompt had reply: null — this turn 
+The turn that delivered the reflection prompt had reply: null — this turn
 (your evaluation) is when you write the closing reply. Do not emit emit_reflection again.
+
+RULE — DO NOT RE-EMIT emit_reflection:
+A reflection card has already been shown to the student and they have answered
+it. If you set signal.emit_reflection again now, the backend will drop it and
+log a warning. On this turn, set signal.last_reflection_quality to evaluate
+the student's response. Re-emitting emit_reflection is a bug, not a feature —
+it does not show the student a new card.
 
 QUALITY RUBRIC:
 

@@ -190,6 +190,12 @@ class Session(BaseModel):
     # Last reflection_prompt the agent emitted, awaiting the student's response
     # so we can attach `response` and `quality` on the next turn.
     pending_reflection_index: int | None = None
+    # Number of finalized turns since the student's response was attached to the
+    # pending reflection but the agent hasn't emitted last_reflection_quality yet.
+    # Bumped in `chat()` when a free-text response is attached; reset to 0 when
+    # quality is recorded or a new reflection is queued. Drives the
+    # `_maybe_force_reflection_quality` safety net.
+    pending_reflection_response_turns: int = 0
     # Last frontend tool_call surfaced to the client, awaiting tool_result on
     # the next /chat call.
     pending_frontend_tool: dict | None = None

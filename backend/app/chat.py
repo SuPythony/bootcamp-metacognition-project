@@ -402,8 +402,17 @@ def _apply_agent_response(session: Session, parsed: AgentResponse) -> None:
                 session.verification_prompted_subproblems.append(session.active_subproblem_id)
 
         # Reflection trigger — queue and remember index for next-turn quality attach.
+        # Idempotency guard: if a reflection is already pending (regardless of whether
+        # the student has answered it yet), drop the new emission. The agent is
+        # expected to set last_reflection_quality next, not re-emit emit_reflection.
+        # Without this guard the model can mint a fresh card every turn during wrap_up.
         emit_trigger = signal.emit_reflection
-        if emit_trigger:
+        if emit_trigger and session.pending_reflection_index is not None:
+            _log.warning(
+                "session=%s emit_reflection=%r ignored: pending_reflection_index=%d already set",
+                session.session_id[:8], emit_trigger, session.pending_reflection_index,
+            )
+        elif emit_trigger:
             already_asked = {rp.question for rp in session.reflection_prompts}
             bank = REFLECTION_QUESTIONS.get(emit_trigger, REFLECTION_QUESTIONS["periodic"])
             available = [q for q in bank if q not in already_asked] or bank
@@ -411,6 +420,7 @@ def _apply_agent_response(session: Session, parsed: AgentResponse) -> None:
             rp = ReflectionPrompt(trigger=emit_trigger, question=question)
             session.reflection_prompts.append(rp)
             session.pending_reflection_index = len(session.reflection_prompts) - 1
+            session.pending_reflection_response_turns = 0
 
         # Reflection quality attaches to the previous pending reflection.
         if signal.last_reflection_quality and session.reflection_prompts:
@@ -430,6 +440,7 @@ def _apply_agent_response(session: Session, parsed: AgentResponse) -> None:
                         signal.last_reflection_quality,
                     )
             session.pending_reflection_index = None
+            session.pending_reflection_response_turns = 0
 
         # Calibration outcome attaches to the most recent open calibration point.
         if signal.calibration_outcome and session.active_subproblem_id:
@@ -515,8 +526,15 @@ def _build_chat_response(
         if queued_idx is not None and 0 <= queued_idx < len(session.reflection_prompts)
         else None
     )
+    # Defense layer for the "sticking like a mite" bug: never re-inject a card
+    # whose queued reflection already has a student response. The student answered
+    # already; showing the card again is the exact user-visible symptom.
+    queued_already_answered = (
+        queued_rp is not None and queued_rp.response is not None
+    )
     if (
         (emit_trigger or queued_rp)
+        and not queued_already_answered
         and not any(d.get("component") == "ReflectionPrompt" for d in directives)
     ):
         trigger = emit_trigger or (queued_rp.trigger if queued_rp else "periodic")
@@ -809,6 +827,40 @@ async def _maybe_capture_initial_understanding(
         session.initial_understanding = summary
 
 
+def _maybe_force_reflection_quality(session: Session) -> None:
+    """Safety net: when a wrap_up reflection has a student response but the
+    agent has gone two finalized turns without setting last_reflection_quality,
+    force quality='decent' so the session can close. Mirrors the
+    deterministic-backend pattern used in `_maybe_queue_wrap_up_reflection`
+    and `_maybe_capture_initial_understanding`.
+
+    The agent's intended pattern (see block_reflection_eval.txt) is: receive
+    student response on turn N+1, emit last_reflection_quality on the same
+    turn. If it misses that turn, the prompt block re-loads on the next turn
+    giving it a second chance. If it misses the second chance too, the
+    `pending_reflection_response_turns` counter has reached 2 and we force-
+    attach quality so `wrap_up_complete` can flip true.
+    """
+    if session.phase != "wrap_up":
+        return
+    idx = session.pending_reflection_index
+    if idx is None or idx >= len(session.reflection_prompts):
+        return
+    rp = session.reflection_prompts[idx]
+    if rp.response is None or rp.quality is not None:
+        return
+    if session.pending_reflection_response_turns < 2:
+        return
+    rp.quality = "decent"
+    session.pending_reflection_index = None
+    session.pending_reflection_response_turns = 0
+    _log.warning(
+        "session=%s forced wrap_up reflection quality='decent' "
+        "(agent never emitted last_reflection_quality after %d turns)",
+        session.session_id[:8], 2,
+    )
+
+
 def _maybe_queue_wrap_up_reflection(
     session: Session, parsed: AgentResponse, previous_phase: Phase
 ) -> None:
@@ -839,6 +891,7 @@ def _maybe_queue_wrap_up_reflection(
     rp = ReflectionPrompt(trigger="wrap_up", question=question)
     session.reflection_prompts.append(rp)
     session.pending_reflection_index = len(session.reflection_prompts) - 1
+    session.pending_reflection_response_turns = 0
     # XOR with reply: the reflection card replaces this turn's assistant text,
     # matching the convention at the top of _finalize_turn (line ~787).
     parsed.reply = None
@@ -873,8 +926,15 @@ async def _finalize_turn(
     # XOR: calibration check and reflection cards replace the reply on that turn.
     # Suppression happens before _validate_phase so the empty reply is recorded in
     # message_history, and before streaming state so the frontend never renders both.
+    # Important: emit_reflection only suppresses the reply if a NEW reflection will
+    # actually be queued. The idempotency guard in _apply_agent_response drops the
+    # emission when one is already pending; if we still nulled the reply here, the
+    # student would see a silent turn with no card replacement.
     emit_trigger = parsed.signal.emit_reflection if parsed.signal else None
-    if calibration_requested or emit_trigger:
+    new_reflection_will_queue = (
+        emit_trigger is not None and session.pending_reflection_index is None
+    )
+    if calibration_requested or new_reflection_will_queue:
         parsed.reply = None
 
     previous_phase = session.phase
@@ -907,6 +967,7 @@ async def _finalize_turn(
 
     _apply_agent_response(session, parsed)
     _maybe_queue_wrap_up_reflection(session, parsed, previous_phase)
+    _maybe_force_reflection_quality(session)
 
     # Graceful close: when the agent emits last_reflection_quality in wrap_up,
     # wrap_up_complete will flip True and the frontend will auto-transition to
@@ -1148,11 +1209,13 @@ async def chat(req: ChatRequest, request: Request):
     if req.message is not None:
         session.message_history.append({"role": "user", "content": req.message})
         # If the agent had asked a reflection question last turn, attach the
-        # response to it.
+        # response to it and bump the "waiting for quality" counter so the
+        # safety net can force-close the session if the agent never evaluates.
         if session.pending_reflection_index is not None:
             idx = session.pending_reflection_index
             if idx < len(session.reflection_prompts):
                 session.reflection_prompts[idx].response = req.message
+                session.pending_reflection_response_turns += 1
     elif req.directive_response is not None:
         session.message_history.append(
             {

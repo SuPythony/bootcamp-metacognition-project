@@ -648,4 +648,170 @@ def test_close_turn_no_strip_outside_wrap_up(client, fake_openrouter):
     resp = client.post("/chat", json={"session_id": sid, "message": "I noticed I almost forgot."})
     # The follow-up question survives — we only strip in wrap_up.
     assert "?" in resp.json()["reply"]
+
+
+# ---------------------------------------------------------------------------
+# Flow 7: reflection "sticking like a mite" — idempotency + safety net
+# ---------------------------------------------------------------------------
+# In a real session the agent re-emitted signal.emit_reflection="wrap_up" on
+# five consecutive turns; the backend queued a fresh ReflectionPrompt every
+# time and rotated the question, so the student saw a different reflection card
+# turn after turn. These four tests pin the fix:
+#   A) idempotency guard in _apply_agent_response,
+#   B) "already answered" guard in _build_chat_response,
+#   C) forced-quality safety net firing at 2 turns,
+#   D) safety net does NOT fire at 1 turn (agent gets one chance to evaluate).
+
+
+def test_emit_reflection_idempotent_within_pending_window(client, fake_openrouter):
+    """Re-emitting emit_reflection while a reflection is pending is dropped.
+
+    Reproduces the live failure (session 3d77d42c…): agent emits
+    emit_reflection="wrap_up" on multiple consecutive wrap_up turns. With
+    Fix A, only the first emission queues a reflection; subsequent ones are
+    ignored, the question bank is not rotated, and the user-facing directive
+    is not re-injected.
+    """
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    # Turn 1: agent enters wrap_up + emits emit_reflection (queue 1st reflection).
+    fake_openrouter.responses = [
+        _agent_reply(None, phase="wrap_up", emit_reflection="wrap_up"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+
+    from app import session as session_mod
+    session = session_mod.get(sid)
+    assert len(session.reflection_prompts) == 1
+    assert session.pending_reflection_index == 0
+    first_question = session.reflection_prompts[0].question
+
+    # Turn 2: student answers; agent BOGUSLY re-emits emit_reflection.
+    # Fix A must drop the new emission; the existing pending reflection stands.
+    fake_openrouter.responses = [
+        _agent_reply(None, emit_reflection="wrap_up"),
+    ]
+    resp = client.post(
+        "/chat",
+        json={"session_id": sid, "message": "I solved it by subtracting 3 then dividing."},
+    )
+
+    session = session_mod.get(sid)
+    # Still exactly one reflection; question hasn't rotated.
+    assert len(session.reflection_prompts) == 1
+    assert session.reflection_prompts[0].question == first_question
+    # The pending index is unchanged.
+    assert session.pending_reflection_index == 0
+    # And the user does NOT see a fresh ReflectionPrompt card (Fix B —
+    # response is set, so even with queued_rp the directive is suppressed).
+    refl_directives = [
+        d for d in resp.json()["ui_directives"]
+        if d["component"] == "ReflectionPrompt"
+    ]
+    assert refl_directives == [], (
+        f"reflection card re-injected after student already answered: {refl_directives}"
+    )
+
+
+def test_reflection_directive_not_reinjected_when_answered(client, fake_openrouter):
+    """Fix B: when a queued reflection already has a student response and the
+    agent emits a quiet turn, the backend must NOT inject the directive again."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    # Turn 1: agent enters wrap_up + queues reflection.
+    fake_openrouter.responses = [
+        _agent_reply(None, phase="wrap_up", emit_reflection="wrap_up"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+
+    # Turn 2: student answers reflection. Agent emits a quiet turn — no
+    # emit_reflection, no last_reflection_quality, just a follow-up question
+    # (the kind of behavior that drove the bug session into a loop).
+    fake_openrouter.responses = [
+        _agent_reply("Tell me more about that."),
+    ]
+    resp = client.post(
+        "/chat",
+        json={"session_id": sid, "message": "I learned to isolate x."},
+    )
+
+    refl_directives = [
+        d for d in resp.json()["ui_directives"]
+        if d["component"] == "ReflectionPrompt"
+    ]
+    assert refl_directives == [], (
+        f"reflection card injected on a turn where student had already responded: "
+        f"{refl_directives}"
+    )
+    # And the agent's reply must NOT have been suppressed — there's no new
+    # card replacing it, so the student must still see the follow-up text.
+    assert resp.json()["reply"] == "Tell me more about that."
+
+
+def test_force_quality_after_two_turns_without_eval(client, fake_openrouter):
+    """Fix C: when the agent fails to emit last_reflection_quality after two
+    finalized turns since the student responded, the backend force-attaches
+    quality='decent' and lets wrap_up_complete flip True."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    # Turn 1: enter wrap_up + queue reflection.
+    fake_openrouter.responses = [
+        _agent_reply(None, phase="wrap_up", emit_reflection="wrap_up"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+
+    # Turn 2: student responds. Agent ignores its duty (no quality).
+    # Counter -> 1, no force yet.
+    fake_openrouter.responses = [_agent_reply("Mmhmm.")]
+    r2 = client.post(
+        "/chat",
+        json={"session_id": sid, "message": "I learned to isolate x."},
+    )
+    assert r2.json()["wrap_up_complete"] is False
+
+    # Turn 3: student responds again. Counter -> 2. Safety net fires.
+    fake_openrouter.responses = [_agent_reply("Go on.")]
+    r3 = client.post("/chat", json={"session_id": sid, "message": "nothing"})
+
+    from app import session as session_mod
+    session = session_mod.get(sid)
+    # Pending index cleared by force.
+    assert session.pending_reflection_index is None
+    # Quality force-attached to the original reflection.
+    rp = session.reflection_prompts[0]
+    assert rp.quality == "decent"
+    # And wrap_up_complete is now True so the frontend can transition.
+    assert r3.json()["wrap_up_complete"] is True
+
+
+def test_force_quality_does_not_fire_on_first_unevaluated_turn(client, fake_openrouter):
+    """Safety net must NOT fire on the immediate turn after the student
+    response — the agent gets one chance to emit last_reflection_quality
+    before the backend gives up."""
+    sid = _new_session(client, fake_openrouter)
+    _advance_to_wrap_up(client, fake_openrouter, sid)
+
+    # Turn 1: enter wrap_up + queue reflection.
+    fake_openrouter.responses = [
+        _agent_reply(None, phase="wrap_up", emit_reflection="wrap_up"),
+    ]
+    client.post("/chat", json={"session_id": sid, "message": "x is 2."})
+
+    # Turn 2: student responds. Agent ignores its duty (no quality, no signal).
+    # Counter goes 0 -> 1. Force threshold is 2, so no force yet.
+    fake_openrouter.responses = [_agent_reply("Mmhmm.")]
+    resp = client.post(
+        "/chat",
+        json={"session_id": sid, "message": "I learned to isolate x."},
+    )
+
+    from app import session as session_mod
+    session = session_mod.get(sid)
+    # Quality must still be None — the agent gets another shot next turn.
+    assert session.reflection_prompts[0].quality is None
+    assert session.pending_reflection_index == 0
+    assert resp.json()["wrap_up_complete"] is False
     assert resp.json()["wrap_up_complete"] is False
