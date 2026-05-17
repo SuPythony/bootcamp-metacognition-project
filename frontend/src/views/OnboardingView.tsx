@@ -53,8 +53,18 @@ export default function OnboardingView({
           onPersonaSession?.(res.session_id, res.opening_message, user);
           return;
         }
-        // Shouldn't happen with confirm=true, but handle gracefully
-        setStep("query");
+        if (res.status === "exists" && res.persona) {
+          // Race condition: persona created elsewhere between Continue and confirm.
+          setStep("query");
+          return;
+        }
+        // Anything else (confirm_new echoed back, missing session_id, missing
+        // opening_message) is a protocol violation — surface it instead of
+        // silently advancing to the problem step with no backing persona.
+        setError(
+          `Unexpected response from backend (status=${res.status ?? "missing"}). ` +
+          "Try again or contact support.",
+        );
       } catch {
         setError("Could not connect. Is the backend running?");
       } finally {

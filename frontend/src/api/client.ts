@@ -65,18 +65,31 @@ async function _chatStream(body: ChatRequest, callbacks: StreamCallbacks): Promi
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
-    const lines = buf.split("\n");
+    // Normalise CRLF → LF so servers behind proxies that rewrite line endings
+    // still parse correctly. Split on \n only after normalisation.
+    const lines = buf.replace(/\r\n/g, "\n").split("\n");
     buf = lines.pop()!; // keep last incomplete line
-    for (const line of lines) {
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/\r$/, "");
       if (line.startsWith("event: ")) {
         currentEvent = line.slice(7).trim();
       } else if (line.startsWith("data: ")) {
+        const payload = line.slice(6);
+        let parsed: unknown;
         try {
-          const parsed = JSON.parse(line.slice(6));
-          if (currentEvent === "token") callbacks.onToken(parsed.delta ?? "");
-          else if (currentEvent === "state") callbacks.onState(parsed as ChatResponse);
-          else if (currentEvent === "error") callbacks.onError(parsed.message ?? "Unknown error");
-        } catch { /* malformed data line — ignore */ }
+          parsed = JSON.parse(payload);
+        } catch (err) {
+          // Surface, don't swallow — silent drops make SSE bugs invisible.
+          // eslint-disable-next-line no-console
+          console.warn("SSE: ignored malformed data line", { payload, err });
+          currentEvent = "";
+          continue;
+        }
+        const event = currentEvent || "message";
+        const obj = parsed as Record<string, unknown>;
+        if (event === "token") callbacks.onToken((obj.delta as string) ?? "");
+        else if (event === "state") callbacks.onState(parsed as ChatResponse);
+        else if (event === "error") callbacks.onError((obj.message as string) ?? "Unknown error");
         currentEvent = "";
       }
     }

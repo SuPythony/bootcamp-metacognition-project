@@ -24,9 +24,15 @@ const OUTCOME_FILL: Record<NonNullable<NonNullable<ThinkingTrace["calibration_po
 const PLOT_SIZE = 220;
 const PAD = 28; // padding around the plot for axis labels
 
+// Calibration tolerates a 1-step gap between predicted confidence (1..5) and
+// the mapped outcome (correct=5, partial=3, wrong=1). Strict equality
+// mislabels predicting 4 then getting it right as "underconfident" — that
+// single-point gap is well within calibration. Anything further than 1
+// counts as over- or under-confident.
 function classify(predicted: number, actual: number): "calibrated" | "over" | "under" {
-  if (predicted === actual) return "calibrated";
-  return predicted > actual ? "over" : "under";
+  const gap = predicted - actual;
+  if (Math.abs(gap) <= 1) return "calibrated";
+  return gap > 0 ? "over" : "under";
 }
 
 function buildSummary(

@@ -25,8 +25,13 @@ function normalize(text: string | null | undefined): string {
 
 export default function MathText({ children, className, inline }: Props) {
   const content = normalize(children);
+  // Inline mode wraps in <span> and forces <p> → <span> so the result can
+  // legally nest inside other inline contexts. Block mode wraps in <div> so
+  // <p>, <pre>, and block-level KaTeX output are valid children — wrapping
+  // those in a <span> produces invalid HTML and React DOM-nesting warnings.
+  const Wrapper: "span" | "div" = inline ? "span" : "div";
   return (
-    <span className={className}>
+    <Wrapper className={className}>
       <ReactMarkdown
         remarkPlugins={[remarkMath, remarkBreaks]}
         rehypePlugins={[rehypeKatex]}
@@ -55,6 +60,6 @@ export default function MathText({ children, className, inline }: Props) {
       >
         {content}
       </ReactMarkdown>
-    </span>
+    </Wrapper>
   );
 }

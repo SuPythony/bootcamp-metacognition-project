@@ -141,13 +141,8 @@ def _op_simplify(expression: str, _variable: str | None) -> tuple[list[dict], st
     first_label = expression if is_constant else _fmt(expr)
     steps: list[dict] = [{"expr": first_label, "rule": "original expression"}]
 
-    # Collect like terms: sympy may already have done this on parse.
-    # Skip for constant expressions — the evaluate step below covers it.
-    parsed_str = _fmt(expr)
-    if not is_constant and parsed_str != expression:
-        steps.append({"expr": parsed_str, "rule": "collect like terms"})
-
     if is_constant:
+        parsed_str = _fmt(expr)
         steps.append({"expr": parsed_str, "rule": "evaluate"})
         return steps, parsed_str
 
@@ -185,8 +180,14 @@ def _op_solve(expression: str, variable: str | None) -> tuple[list[dict], str]:
 
     if eq_count == 1:
         lhs_str, rhs_str = expression.split("=", 1)
-        lhs = _parse(lhs_str.strip())
-        rhs = _parse(rhs_str.strip())
+        lhs_str, rhs_str = lhs_str.strip(), rhs_str.strip()
+        if not lhs_str or not rhs_str:
+            raise ValueError(
+                "Equation has an empty side. "
+                "Provide both a left-hand and right-hand side (e.g. 'x + 1 = 5')."
+            )
+        lhs = _parse(lhs_str)
+        rhs = _parse(rhs_str)
         eq_expr = lhs - rhs
         steps: list[dict] = [{"expr": f"{_fmt(lhs)} = {_fmt(rhs)}", "rule": "original equation"}]
         steps.append({"expr": f"{_fmt(eq_expr)} = 0", "rule": "rearrange: move all terms to one side"})
@@ -207,13 +208,32 @@ def _op_solve(expression: str, variable: str | None) -> tuple[list[dict], str]:
 
     solutions = sympy.solve(eq_expr, var)
 
+    # sympy.solve normally returns a list. For non-polynomial equations
+    # (inequalities, transcendentals, etc.) it can return a Relational,
+    # ConditionSet, ImageSet, or dict — none of which support len(). Normalise
+    # those into a list of solution expressions so downstream code is safe.
+    if isinstance(solutions, dict):
+        solutions = [v for v in solutions.values()]
+    elif not isinstance(solutions, list):
+        # Relational / ConditionSet / ImageSet — render directly.
+        steps.append({"expr": _fmt(solutions), "rule": f"solution for {var}"})
+        return steps, _fmt(solutions)
+
     if solutions is None or len(solutions) == 0:
         steps.append({"expr": "no real solution", "rule": f"solve for {var}"})
         return steps, "No real solution"
 
-    sol_strs = [f"{var} = {_fmt(s)}" for s in solutions]
+    # Partition real vs complex roots so the label is honest.
+    real_sols = [s for s in solutions if getattr(s, "is_real", None) is not False]
+    complex_sols = [s for s in solutions if getattr(s, "is_real", None) is False]
+    sol_strs = [f"{var} = {_fmt(s)}" for s in real_sols + complex_sols]
     for s in sol_strs:
         steps.append({"expr": s, "rule": f"solution for {var}"})
+    if complex_sols and not real_sols:
+        steps.append({
+            "expr": ", ".join(sol_strs),
+            "rule": "no real solutions; complex roots only",
+        })
 
     return steps, ",   ".join(sol_strs)
 
@@ -287,7 +307,7 @@ def _op_integrate(expression: str, variable: str | None) -> tuple[list[dict], st
 
 def _diff_rule(expr: sympy.Expr, var: Symbol) -> str:
     if isinstance(expr, Pow):
-        base, exp_part = expr.args
+        base, _ = expr.args
         if base == var:
             return f"power rule: d/d{var}(u^n) = n·u^(n-1)"
     if isinstance(expr, Add):
@@ -308,7 +328,7 @@ def _diff_rule(expr: sympy.Expr, var: Symbol) -> str:
 
 def _integrate_rule(expr: sympy.Expr, var: Symbol) -> str:
     if isinstance(expr, Pow):
-        base, exp_part = expr.args
+        base, _ = expr.args
         if base == var:
             return "power rule: ∫x^n dx = x^(n+1)/(n+1)"
     if isinstance(expr, Add):

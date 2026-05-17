@@ -581,6 +581,7 @@ class _ReplyExtractor:
         self._state = "scan"   # scan → colon → open_quote → value → done
         self._buf = ""
         self._esc = False
+        self._unicode_buf = ""  # accumulates the 4 hex digits after \u
 
     def feed(self, chunk: str) -> str:
         out: list[str] = []
@@ -614,6 +615,12 @@ class _ReplyExtractor:
                     self._buf = c
             elif self._state == "value":
                 if self._esc:
+                    if c == "u":
+                        # Begin 4-hex-digit unicode escape; defer emit until full.
+                        self._esc = False
+                        self._unicode_buf = ""
+                        self._state = "unicode_esc"
+                        continue
                     _MAP = {
                         "n": "\n", "t": "\t", "r": "\r", '"': '"',
                         "\\": "\\", "/": "/", "b": "\b", "f": "\f",
@@ -626,6 +633,16 @@ class _ReplyExtractor:
                     self._state = "done"
                 else:
                     out.append(c)
+            elif self._state == "unicode_esc":
+                self._unicode_buf += c
+                if len(self._unicode_buf) == 4:
+                    try:
+                        out.append(chr(int(self._unicode_buf, 16)))
+                    except ValueError:
+                        # Malformed escape — emit literally so caller can see breakage.
+                        out.append("\\u" + self._unicode_buf)
+                    self._unicode_buf = ""
+                    self._state = "value"
             # done: consume silently
         return "".join(out)
 
@@ -734,7 +751,7 @@ async def stream_tutor(
         "model": model,
         "latency_ms": int((time.monotonic() - t0) * 1000),
         "input_tokens": stream_usage.get("prompt_tokens", 0),
-        "output_tokens": stream_usage.get("completion_tokens", len(full_content.split())),
+        "output_tokens": stream_usage.get("completion_tokens", 0),
         "raw_output": cleaned,
         "user_message_preview": next(
             (m["content"][:300] for m in reversed(messages) if m.get("role") == "user"), None

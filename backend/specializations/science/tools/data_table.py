@@ -27,11 +27,30 @@ def run(args: dict, session) -> dict:
         }
 
     n_cols = len(columns)
+    if n_cols == 0 and any(isinstance(r, list) and r for r in rows):
+        return {
+            "result": "error: 'columns' is empty but rows contain data — provide column headers",
+            "display_data": {},
+            "ui_component": "DataTable",
+        }
+
     cleaned_rows = []
+    bad_rows = 0
     for row in rows:
         if isinstance(row, list):
             # Pad or truncate to match column count
             cleaned_rows.append((row + [None] * n_cols)[:n_cols])
+        else:
+            bad_rows += 1
+    if bad_rows > 0:
+        return {
+            "result": (
+                f"error: 'rows' must be a list of lists — got {bad_rows} non-list row(s). "
+                "Each row must be a list of cell values."
+            ),
+            "display_data": {},
+            "ui_component": "DataTable",
+        }
 
     summary = f"{len(cleaned_rows)} row(s) × {n_cols} column(s)"
     if title:

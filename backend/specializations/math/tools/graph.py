@@ -50,6 +50,11 @@ def run(args: dict, session: Any) -> dict:
     # LLM may pass a list of expressions to overlay on one plot (e.g. ["2x+3", "7"]).
     if isinstance(raw_expr, list):
         raw_list = [str(e).strip() for e in raw_expr if str(e).strip()]
+    elif isinstance(raw_expr, dict):
+        return _error(
+            "'expression' must be a string or list of strings, not a dict. "
+            "Pass the formula directly, e.g. expression='x**2 + 1'."
+        )
     else:
         # LLM sometimes JSON-encodes the list as a string: "[20-2x, (60-4x)/3]".
         # Try JSON parse first; fall back to treating as a single expression string.
@@ -82,7 +87,7 @@ def run(args: dict, session: Any) -> dict:
         else:
             expressions.append(expr_str)
 
-    if not expressions:
+    if not expressions or not any(expressions):
         return _error("No expression provided")
 
     x_range = args.get("x_range") or [-10, 10]
@@ -143,7 +148,6 @@ def _eval_expr(expression: str, x_vals: np.ndarray, variables: dict) -> np.ndarr
     subs = {Symbol(k): float(v) for k, v in variables.items() if k != "x"}
     if subs:
         sym_expr = sym_expr.subs(subs)
-
     # Warn if the expression contains free symbols other than x — those won't be
     # substituted and will produce an error or unexpected output.
     free = sym_expr.free_symbols - {Symbol("x")}

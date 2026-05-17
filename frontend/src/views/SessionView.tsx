@@ -10,7 +10,7 @@ import PhaseStepper from "../components/PhaseStepper";
 import MathText from "../components/MathText";
 import { Brandmark } from "../components/brand/Brandmark";
 import { ThemeToggle } from "../components/theme/ThemeToggle";
-import { lookup } from "../specializations/registry";
+import { lookup, has as hasComponent } from "../specializations/registry";
 
 // Directives that require a single-click answer and should block chat input
 // until the student responds. Display-only / type-into-chat directives
@@ -109,6 +109,20 @@ export default function SessionView({
   // presses or directive clicks could otherwise double-fire before the disabled
   // state takes effect. A ref flips immediately and is checked at entry.
   const inFlightRef = useRef(false);
+  // Track pending transition timers so we can cancel on unmount (otherwise
+  // setState fires on an unmounted component and re-routes the user).
+  const transitionTimersRef = useRef<number[]>([]);
+  // Track mount state so async callbacks (chatStream, setTimeout) don't update
+  // state after unmount.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      for (const id of transitionTimersRef.current) clearTimeout(id);
+      transitionTimersRef.current = [];
+    };
+  }, []);
 
   async function send(message?: string, directiveResponse?: { component: string; value: unknown }) {
     setIsLoading(true);
@@ -130,7 +144,8 @@ export default function SessionView({
     if (message) req.message = message;
     if (directiveResponse) req.directive_response = directiveResponse;
 
-    await api.chatStream(req, {
+    try {
+      await api.chatStream(req, {
       onToken(delta) {
         setMessages((prev) => {
           const updated = [...prev];
@@ -182,17 +197,25 @@ export default function SessionView({
           );
         }
         if (res.tool_calls?.length > 0) setToolResults(res.tool_calls);
-        if (modalNew.length > 0) setModalDirective(modalNew[0]);
+        // Always set modalDirective from the new turn — including null to
+        // clear a stale modal when the new turn has none.
+        setModalDirective(modalNew.length > 0 ? modalNew[0] : null);
 
         setIsLoading(false);
         inFlightRef.current = false;
 
         if (res.onboarding_complete) {
-          setTimeout(() => onOnboardingComplete?.(), 1200);
+          const id = window.setTimeout(() => {
+            if (mountedRef.current) onOnboardingComplete?.();
+          }, 1200);
+          transitionTimersRef.current.push(id);
         } else if (res.wrap_up_complete) {
           // Only transition after the full reflection round-trip is done.
           // The "End session →" header button is the manual escape hatch.
-          setTimeout(onWrapUp, 1800);
+          const id = window.setTimeout(() => {
+            if (mountedRef.current) onWrapUp();
+          }, 1800);
+          transitionTimersRef.current.push(id);
         }
       },
       onError(msg) {
@@ -209,7 +232,25 @@ export default function SessionView({
         setIsLoading(false);
         inFlightRef.current = false;
       },
-    });
+      });
+    } catch (err) {
+      // chatStream throws on network failures (fetch reject, aborted reader).
+      // Without this catch, isLoading + inFlightRef stay true permanently and
+      // the input is locked until reload.
+      const msg = err instanceof Error ? err.message : String(err);
+      setMessages((prev) => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last?.role === "assistant" && last.content === "") {
+          updated[updated.length - 1] = { ...last, content: `Error: ${msg}` };
+        } else {
+          updated.push({ role: "assistant", content: `Error: ${msg}` });
+        }
+        return updated;
+      });
+      setIsLoading(false);
+      inFlightRef.current = false;
+    }
   }
 
   function handleSend(text: string) {
@@ -298,10 +339,7 @@ export default function SessionView({
     send(undefined, { component, value });
   }
 
-  const awaitingDirective = isAwaitingDirective(
-    messages,
-    (key) => lookup(key) !== undefined,
-  );
+  const awaitingDirective = isAwaitingDirective(messages, hasComponent);
 
   useEffect(() => {
     if (!modalDirective) return;
