@@ -23,6 +23,7 @@ import numpy as np
 import sympy
 from sympy import Symbol, lambdify
 from sympy.parsing.sympy_parser import (
+    convert_xor,
     implicit_multiplication_application,
     parse_expr,
     standard_transformations,
@@ -38,7 +39,7 @@ _LOCALS.update({
     "abs": sympy.Abs,
 })
 
-_TRANSFORMS = standard_transformations + (implicit_multiplication_application,)
+_TRANSFORMS = standard_transformations + (implicit_multiplication_application, convert_xor)
 
 # Maximum y-distance rendered; clips asymptotes so the axes stay readable.
 _Y_CLIP = 1e6

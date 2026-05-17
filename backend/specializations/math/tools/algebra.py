@@ -33,6 +33,7 @@ from sympy import (
     tan,
 )
 from sympy.parsing.sympy_parser import (
+    convert_xor,
     implicit_multiplication_application,
     parse_expr,
     standard_transformations,
@@ -85,7 +86,7 @@ def _error(msg: str, expression: str) -> dict:
     }
 
 
-_TRANSFORMS = standard_transformations + (implicit_multiplication_application,)
+_TRANSFORMS = standard_transformations + (implicit_multiplication_application, convert_xor)
 
 
 def _parse(expression: str) -> sympy.Expr:
