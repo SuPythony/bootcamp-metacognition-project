@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Interactive backend testing script for the Socratic Tutor.
+Interactive backend testing script for Aporeka.
 
 Starts a session against a running backend and lets you chat turn-by-turn.
 Every request, response, and session-state snapshot is logged to a JSON file.
@@ -315,7 +315,7 @@ def run_session(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Interactive Socratic Tutor backend tester",
+        description="Interactive Aporeka backend tester",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

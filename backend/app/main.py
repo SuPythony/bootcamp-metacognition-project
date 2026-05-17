@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Socratic Tutor", lifespan=lifespan)
+app = FastAPI(title="Aporeka", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
