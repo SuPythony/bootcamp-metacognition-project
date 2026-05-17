@@ -29,7 +29,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **SSE streaming** — `stream_tutor()` in `backend/app/llm.py` raises `NotImplementedError`. All chat responses are currently non-streaming (full JSON on completion). Implement SSE for word-by-word streaming (see Priority 3).
 - **Seeded dialogue tests** — `backend/tests/test_socratic_constraints.py` has assertion helpers and probe-backed slow tests, but no deterministic seeded dialogue test cases (canned turn sequences with hardcoded LLM replies). The probe suite covers live-LLM regression; seeded dialogues would give a fast, deterministic gate (see Priority 4).
-- **EC2 deploy** — not yet deployed; nginx + systemd setup documented below but not executed.
+- **EC2 deploy** — deploy artifacts shipped under `deploy/` (bootstrap.sh, deploy.sh, nginx + systemd templates, hostname parameterized via `deploy/deploy.env`). First deploy still pending — nothing has been run on a real box yet.
 - **Critique Mode** — designed and prompt-drafted (`critic_base.txt`) but deferred to v1.1.
 - **Calibration & reflection signals still dormant** — `ThinkingTraceDrawer` renders Calibration and Reflection sections, but in real sessions the agent rarely emits `emit_reflection` or `emit_calibration_check`, so the sections are mostly empty. The UI is wired; the prompt needs tuning to actually trigger these flows. (Note: the `initial_understanding` / understanding-delta rendering, which was previously affected by the same kind of dormancy at the *backend* level, is now solved by deterministic backend capture — see the "Initial-understanding capture" entry above. Reflection/calibration require a similar fix on the *prompt* side.)
 
@@ -623,7 +623,7 @@ bootcamp-metacognition-project/
 
 ---
 
-# Socratic Tutor App
+# Aporeka
 
 > **Core philosophy**: The AI never solves the problem for the student.
 > It guides them to solve it themselves by surfacing their own understanding,
@@ -1555,7 +1555,7 @@ The product runs on the team's **AWS EC2 instance** (instance details in team ch
 
 - Backend: `systemd` unit running `uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1`. Single worker because session state is in-memory; sticky sessions on multiple workers would need shared storage (out of scope for v1).
 - Frontend: built into `frontend/dist/` at deploy time, served as static files. No node process in production.
-- Logs to journald; `journalctl -u socratic-tutor` reads them.
+- Logs to journald; `journalctl -u aporeka` reads them.
 
 ### Env vars
 
@@ -1564,17 +1564,41 @@ The product runs on the team's **AWS EC2 instance** (instance details in team ch
 
 ### Secrets
 
-- `OPENROUTER_API_KEY` lives in `/etc/socratic-tutor.env` (`chmod 600`, owned by the service user). Read by the systemd unit via `EnvironmentFile=`. Never in the repo, never in a Docker image.
+- `OPENROUTER_API_KEY` lives in `/etc/aporeka.env` (`chmod 600`, owned by the service user). Read by the systemd unit via `EnvironmentFile=`. Never in the repo, never in a Docker image.
 
-### Deploy steps (manual v1)
+### Deploy scripts
 
-1. SSH to EC2.
-2. `git pull` in the deploy directory.
-3. Backend: `.venv/bin/pip install -e ".[dev,math]"`, then `sudo systemctl restart socratic-tutor`.
-4. Frontend: `npm install && npm run build`, then `sudo cp -r frontend/dist/* /var/www/socratic-tutor/`.
-5. `sudo nginx -t && sudo systemctl reload nginx`.
+All deploy artifacts live under `deploy/`. Hostname and host-specific paths are parameterized via a single config (`deploy/deploy.env`, gitignored), so the same scripts work on any host without code edits.
 
-A bash script under `deploy/deploy.sh` will wrap these once the first deploy lands. CI/CD is out of scope for v1.
+Files:
+- `deploy/deploy.env.example` — committed template; deployer copies to `deploy.env` on the box and edits `APP_HOSTNAME` + `ADMIN_EMAIL`.
+- `deploy/nginx.conf.template` — server block, `${APP_HOSTNAME}` substituted via `envsubst`. **SSE-ready directives pre-baked** (`proxy_buffering off`, `proxy_http_version 1.1`, long timeouts) so the future streaming work needs no nginx changes.
+- `deploy/aporeka.service` — systemd unit template, `${APP_USER}` and `${APP_DIR}` substituted. Single worker (mandatory; in-memory sessions).
+- `deploy/aporeka.env.template` — backend env template; rendered to `/etc/aporeka.env` with `chmod 600`.
+- `deploy/bootstrap.sh` — one-time, root, idempotent. Installs apt deps (incl. Node 20 via NodeSource), renders templates, installs narrow sudoers entry for the deploy user, prints the exact certbot command to run.
+- `deploy/deploy.sh` — every-deploy, run as `APP_USER`. `git pull` → backend `pip install` → frontend `npm ci && npm run build` → `rsync` to `/var/www/aporeka/` → restart backend → reload nginx → smoke test `/health` + `/specializations`.
+- `frontend/.env.production` — `VITE_API_URL=/api`, `VITE_USE_MOCK=false`. Auto-loaded by `npm run build`.
+
+First deploy (one-time):
+
+```
+ssh user@$APP_HOSTNAME
+# clone repo to $APP_DIR (default /opt/aporeka/app), then:
+cp deploy/deploy.env.example deploy/deploy.env  # edit APP_HOSTNAME + ADMIN_EMAIL
+sudo bash deploy/bootstrap.sh
+sudo nano /etc/aporeka.env               # replace replace-me with the real OPENROUTER_API_KEY
+bash deploy/deploy.sh                            # app live on http://$APP_HOSTNAME
+sudo certbot --nginx -d $APP_HOSTNAME --non-interactive --agree-tos -m $ADMIN_EMAIL
+sudo systemctl enable aporeka             # survive reboots
+```
+
+Every subsequent deploy:
+
+```
+ssh user@$APP_HOSTNAME && cd $APP_DIR && bash deploy/deploy.sh
+```
+
+Sub-minute for code-only changes; ~2 min when deps change. CI/CD is out of scope for v1.
 
 ### Persona files in production
 
@@ -1618,7 +1642,7 @@ The v1 MVP is the minimum that demonstrates the brief's "show and do, don't tell
 
 **Ship**
 
-17. ⬜ **Deploy to EC2** — nginx + systemd + Let's Encrypt; manual deploy script documented below but not yet executed
+17. 🟡 **Deploy to EC2** — deploy artifacts shipped under `deploy/` (bootstrap.sh, deploy.sh, nginx/systemd/env templates parameterized via `deploy/deploy.env`). First deploy on a real EC2 box still pending.
 
 ### Priority 2 — Math tools (DONE)
 

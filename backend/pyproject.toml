@@ -1,7 +1,7 @@
 [project]
-name = "socratic-tutor-backend"
+name = "aporeka-backend"
 version = "0.1.0"
-description = "Socratic Tutor backend — FastAPI + OpenRouter"
+description = "Aporeka backend — FastAPI + OpenRouter"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

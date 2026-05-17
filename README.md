@@ -193,13 +193,25 @@ Open `http://127.0.0.1:5000`. Filter by session or event type, inspect thinking 
 
 ## Deployment (AWS EC2)
 
-1. SSH to instance
-2. `git pull`
-3. Backend: `.venv/bin/pip install -e ".[dev,math]"` → `sudo systemctl restart aporeka`
-4. Frontend: `npm install && npm run build` → `sudo cp -r frontend/dist/* /var/www/aporeka/`
-5. `sudo nginx -t && sudo systemctl reload nginx`
+Scripts live under `deploy/`. The hostname is not hardcoded — copy `deploy/deploy.env.example` to `deploy/deploy.env` on the box and set `APP_HOSTNAME` (and `ADMIN_EMAIL`) once.
 
-HTTPS via Let's Encrypt. `OPENROUTER_API_KEY` in `/etc/aporeka.env` (`chmod 600`), never in the repo.
+First deploy (one-time, on the box):
+
+```bash
+sudo bash deploy/bootstrap.sh           # installs deps, renders nginx + systemd, sudoers
+sudo nano /etc/aporeka.env       # set OPENROUTER_API_KEY
+bash deploy/deploy.sh                   # build + publish + restart
+sudo certbot --nginx -d $APP_HOSTNAME --non-interactive --agree-tos -m $ADMIN_EMAIL
+sudo systemctl enable aporeka
+```
+
+Every subsequent deploy:
+
+```bash
+ssh user@$APP_HOSTNAME && cd $APP_DIR && bash deploy/deploy.sh
+```
+
+Nginx is configured with SSE-ready directives so the future streaming work needs no infra changes. `OPENROUTER_API_KEY` lives in `/etc/aporeka.env` (`chmod 600`), never in the repo. See `CLAUDE.md` § Deployment for the full file map and rationale.
 
 ---
 
